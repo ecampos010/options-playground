@@ -1,0 +1,7 @@
+# Red: enter ONLY on days the hard gate trips; one lot at a time; 1% budget (tier default).
+# Optional "ignore" switches (each separate; CLI: --red-ignore event,expiry-cap,time-exit,stop):
+#   event_buffer: false / expiry_cap: false / time_exit: 0 / stop_mult: null
+tier: "red"
+gate: false
+entry_requires_gate_trip: true
+max_open_lots: 1

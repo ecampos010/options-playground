@@ -1,0 +1,8 @@
+# Copy to data/events.csv and fill with REAL dates from official calendars. Never guess dates.
+# Columns: date,event[,symbol]
+#   date   = YYYY-MM-DD (ET calendar date of the release/event)
+#   event  = FOMC (decision day) | CPI | PPI | NFP (jobs report) | ELECTION (US Election Day) | EARNINGS
+#   symbol = only for EARNINGS rows (e.g. AAPL); ignored for other types. SPY runs ignore EARNINGS.
+# Lines starting with '#' are ignored.
+date,event,symbol
+# 2024-01-31,FOMC,
