@@ -82,3 +82,16 @@ dte_entry, exit_reason (tp|stop|stop_dollar|breach|trigger_exit|time|expiry|othe
 adj_count, adj_cost_per_contract, hedge_cost_per_contract, cf_pnl_to_expiry_per_contract, entry_spot, exit_spot, entry_vix, vix_bucket (lt15|15to20|20to30|gt30), vix_term_ratio,
 short_put_delta, short_call_delta, exdiv_flag, guards_on, fill_model, spot_source. `marks.csv`: trade_id, date, mark_pnl_per_contract. `blocked_entries.csv`: date, ticker, reason.
 `config.json`, `meta.json`. All money in USD per ONE contract. Requests for changes: `docs/SCHEMA_REQUESTS.md`.
+
+## Playbooks and Awards
+`report` adds a "Playbooks and Awards" section (HTML anchor `#playbooks`), `playbooks.md`, and `results/playbooks.json` (`--playbooks-json` to move it).
+It only *selects* from the scenarios already replayed (zones, Monte Carlo ruin odds, stress lab, trade counts); all thresholds are in `config/playbooks.yaml`.
+Playbooks: Capital Preservation, Conservative (with an honest buy-and-hold SPY comparison when `--spy-csv` is given), Moderate, Max Safe Growth, Growth,
+Lottery Ticket (the only selector that ranks on final equity; labelled luck-dependent) and Big Short Style (long put, put debit spread, long strangle:
+max loss = debit, judged on the Feb 2018 / Mar 2020 / 2022 stress windows; they bleed in calm periods and pay in crashes - run `sweeps/big_short.yaml`
+through `stress` to feed it). Awards: Highest Win Rate, Highest ROI/CAGR, Happy Medium, Worst Performance (with the reason it lost).
+Every card prints the number of configs tried and the first-half vs second-half result; rows under 30 trades are flagged TOO FEW TRADES and excluded.
+The synthetic demo has no long-premium logs, so Big Short shows "not run" there. Backtest on one 10-year history, not a promise or advice.
+
+Open trades: a trade whose expiry is after the last data date is excluded from `trades.csv` (never a win or a loss); the count is in `meta.json`
+(`open_excluded`) and in the report header.

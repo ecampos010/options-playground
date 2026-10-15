@@ -38,7 +38,11 @@ class Logs:
     configs: dict = field(default_factory=dict)   # run_id -> config.json dict
     synthetic: bool = False
     problems: list = field(default_factory=list)  # (severity, run, message)
+    open_excluded: dict = field(default_factory=dict)   # run_id -> count of still-open trades excluded by the backtest
     delta_sources: dict = field(default_factory=dict)   # run_id -> "theta_greeks" | "bs_fallback" | "mixed" | "unknown"
+
+    def open_excluded_total(self) -> int:
+        return int(sum(self.open_excluded.values()))
 
     def delta_source_summary(self) -> str:
         """One line for report headers: how many runs used which delta source."""
@@ -48,6 +52,15 @@ class Logs:
         for v in self.delta_sources.values():
             n[v] = n.get(v, 0) + 1
         return ", ".join(f"{k} x{v}" for k, v in sorted(n.items()))
+
+
+def read_open_excluded(run_dir: Path) -> int:
+    """meta.json -> open_excluded.count (trades still open when the data ended; never in trades.csv). 0 if absent."""
+    try:
+        meta = json.loads((Path(run_dir) / "meta.json").read_text())
+        return int((meta.get("open_excluded") or {}).get("count", 0))
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def read_delta_source(run_dir: Path) -> str:
@@ -199,12 +212,13 @@ def load_runs(root: str | Path) -> Logs:
         problems.append(("error", str(root), "runs directory does not exist"))
     elif not dirs:
         problems.append(("error", str(root), "no trades.csv here or in any subfolder (expected a run folder or a folder of runs)"))
-    ts, ms, bs, cfgs, dsrc = [], [], [], {}, {}
+    ts, ms, bs, cfgs, dsrc, opn = [], [], [], {}, {}, {}
     for d in dirs:
         t, m, b, cfg, pr = load_run(d)
         problems += pr
         cfgs[d.name] = cfg
         dsrc[d.name] = read_delta_source(d)
+        opn[d.name] = read_open_excluded(d)
         if not t.empty:
             ts.append(t)
             ms.append(m)
@@ -213,7 +227,7 @@ def load_runs(root: str | Path) -> Logs:
     marks = pd.concat(ms, ignore_index=True) if ms else pd.DataFrame(columns=MARK_COLS + ["uid"])
     blocked = pd.concat(bs, ignore_index=True) if bs else pd.DataFrame(columns=BLOCKED_COLS + ["run_id"])
     synth = bool(cfgs) and any(bool(c.get("synthetic")) for c in cfgs.values())
-    return Logs(trades, marks, blocked, cfgs, synth, problems, dsrc)
+    return Logs(trades, marks, blocked, cfgs, synth, problems, opn, dsrc)
 
 
 def validate_cli(root: str) -> int:
@@ -221,7 +235,7 @@ def validate_cli(root: str) -> int:
     errs = [p for p in lg.problems if p[0] == "error"]
     for sev, run, msg in lg.problems:
         print(f"[{sev.upper()}] {run}: {msg}")
-    print(f"delta source: {lg.delta_source_summary()}")
+    print(f"delta source: {lg.delta_source_summary()}; open trades excluded (expiry after last data date): {lg.open_excluded_total()}")
     print(f"{len(lg.trades)} trades, {len(lg.marks)} marks, {len(lg.blocked)} blocked rows; "
           f"{len(errs)} error(s), {len(lg.problems) - len(errs)} warning(s)"
           + ("  [SYNTHETIC]" if lg.synthetic else ""))

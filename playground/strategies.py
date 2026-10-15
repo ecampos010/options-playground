@@ -44,6 +44,9 @@ def collateral_per_contract(legs: list[Leg], credit_ps: float, S0: float) -> flo
     return round(max_loss_ps(legs, credit_ps, S0) * 100.0, 4)
 
 
+LONG_PREMIUM = ("long_put", "put_debit_spread", "long_strangle")
+
+
 def expected_max_loss_ps(strategy: str, legs: list[Leg], credit_ps: float, S0: float = 0.0) -> float:
     """Closed-form max loss per share from the ACTUAL strikes of the legs (never a nominal/fixed width).
     Independent of the payoff scan in max_loss_ps, so the two cross-check each other."""
@@ -59,6 +62,8 @@ def expected_max_loss_ps(strategy: str, legs: list[Leg], credit_ps: float, S0: f
         body = next(l.strike for l in legs if l.qty == -2)
         near, far = k1 - body, body - k3
         return max(0.0, max(far - near, 0.0) - credit_ps)   # wider wing - narrower wing - credit
+    if strategy in LONG_PREMIUM:                           # debit paid is the most you can lose; never naked
+        return max(0.0, -credit_ps)
     if strategy == "cash_secured_put":
         return max(0.0, k("P", -1)[0] - credit_ps)
     if strategy == "covered_call":
@@ -276,4 +281,58 @@ class CoveredCall(Strategy):
         return [Leg("S", 0.0, 1), Leg("C", sc, -1)]
 
 
-STRATEGIES = {s.name: s for s in (IronCondor(), IronButterfly(), BullPutSpread(), PutBWB(), CashSecuredPut(), CoveredCall())}
+def _pick_long(ch: Chain, right: str) -> float | None:
+    """Strike to BUY: by the configured rule (delta or vix-distance) among strikes with an ask."""
+    ks = [k for k in ch._ks[right] if ch.q[(right, k)][1] > 0]
+    if not ks:
+        return None
+    rule = ch.cfg.strike_rule
+    if rule["mode"] == "delta":
+        tgt = rule["put_delta" if right == "P" else "call_delta"]
+        ok = [k for k in ks if ch.delta(right, k) is not None]
+        return min(ok, key=lambda k: abs(abs(ch.delta(right, k)) - tgt)) if ok else None
+    tp, tc = rules.target_strikes(ch.spot, ch.vix, ch.cfg)
+    tgt = tp if right == "P" else tc
+    return min(ks, key=lambda k: abs(k - tgt))
+
+
+class LongPut(Strategy):
+    """Buy one put. Max loss = debit paid. Bleeds theta in calm markets, pays in crashes (Big Short style)."""
+
+    def __init__(self):
+        super().__init__("long_put", {"breach_exit": False}, credit=False, sides="P")
+
+    def build(self, ch):
+        k = _pick_long(ch, "P")
+        return None if k is None else [Leg("P", k, 1)]
+
+
+class PutDebitSpread(Strategy):
+    """Buy a put, sell a cheaper put one width lower. Max loss = debit paid (the short put is covered by the long)."""
+
+    def __init__(self):
+        super().__init__("put_debit_spread", {"breach_exit": False}, credit=False, sides="P")
+
+    def build(self, ch):
+        k = _pick_long(ch, "P")
+        s = None if k is None else ch.wing("P", k, -1)
+        if s is None or ch.quote("P", s)[0] <= 0:
+            return None
+        return [Leg("P", k, 1), Leg("P", s, -1)]
+
+
+class LongStrangle(Strategy):
+    """Buy an OTM put and an OTM call. Max loss = total debit paid; no short legs."""
+
+    def __init__(self):
+        super().__init__("long_strangle", {"breach_exit": False}, credit=False, sides="PC")
+
+    def build(self, ch):
+        kp, kc = _pick_long(ch, "P"), _pick_long(ch, "C")
+        if kp is None or kc is None or kp >= kc:
+            return None
+        return [Leg("P", kp, 1), Leg("C", kc, 1)]
+
+
+STRATEGIES = {s.name: s for s in (IronCondor(), IronButterfly(), BullPutSpread(), PutBWB(), CashSecuredPut(), CoveredCall(),
+                                 LongPut(), PutDebitSpread(), LongStrangle())}

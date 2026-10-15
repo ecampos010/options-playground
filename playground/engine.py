@@ -63,6 +63,7 @@ class Result:
     blocked: dict
     gaps: int
     events_note: str
+    open_excluded: list = field(default_factory=list)   # still open at the end of data; not in `trades`
 
 
 def entry_minutes(d: date, cfg: Config) -> list[int]:
@@ -308,12 +309,17 @@ class _Run:
             self.eq_rows.append({"date": d, "cash": round(self.cash, 2), "equity": round(prev_eq, 2),
                                  "open_risk": round(sum(p.risk for p in self.pos), 2),
                                  "n_open": len(self.pos)})
-        for pos in list(self.pos):           # leave nothing open: mark out at last mid
-            self._close(pos, "end", pos.last_mid, pd.Timestamp(prev_day), prev_day)
+        self.open_excluded = []
+        end_eq = self.equity()
+        for pos in list(self.pos):           # still open when the data ends: excluded, never counted as win/loss
+            self.pos.remove(pos)
+            self.open_excluded.append({"entry_ts": str(pos.entry_ts), "expiry": str(pos.expiry)})
         if self.eq_rows:
-            self.eq_rows[-1]["equity"] = round(self.cash, 2)
-        return Result(cfg, self.p.name, pd.DataFrame(self.trades), pd.DataFrame(self.eq_rows),
-                      self.blocked, self.gaps, self.ev_note)
+            self.eq_rows[-1]["equity"] = round(end_eq, 2)
+        res = Result(cfg, self.p.name, pd.DataFrame(self.trades), pd.DataFrame(self.eq_rows),
+                     self.blocked, self.gaps, self.ev_note)
+        res.open_excluded = self.open_excluded
+        return res
 
 
 def run_backtest(provider: Provider, cfg: Config, events: pd.DataFrame | None = None,

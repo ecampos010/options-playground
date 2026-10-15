@@ -13,7 +13,7 @@ import pandas as pd
 
 from . import ALLOCATIONS, CAVEAT, LEVEL_TAGS, START_EQUITY
 from . import grid as G
-from . import htmlreport, mgmt, stress, thermo, verdicts, ways
+from . import htmlreport, mgmt, playbooks, stress, thermo, verdicts, ways
 from .replay import ReplayConfig, build_variant
 from .schema import load_runs
 
@@ -37,6 +37,7 @@ class ReportOptions:
     baseline_tag: str | None = None
     config_dir: str | None = None
     synthetic: bool | None = None
+    playbooks_json: str | None = None      # default: results/playbooks.json
 
 
 def read_spy(path: str | None):
@@ -116,9 +117,10 @@ def stress_md(st: pd.DataFrame, bp_md: str, synthetic: bool) -> str:
     return "\n".join(L) + "\n\n" + bp_md
 
 
-def verdicts_md(ok, br, synthetic, delta_source: str = "unknown") -> str:
+def verdicts_md(ok, br, synthetic, delta_source: str = "unknown", open_excluded: int = 0) -> str:
     L = ["# Verdicts", "", f"> {CAVEAT}"] + (["> **SYNTHETIC** - generated fixtures, not market data."] if synthetic else []) + [
         "", f"Delta source in these logs: **{delta_source}** (theta_greeks = ThetaData first_order Greeks; bs_fallback = Black-Scholes from mid IV).",
+        "", f"Open trades excluded (expiry after the last data date, never counted as wins or losses): **{open_excluded}**.",
         "", "Ranked within thermometer zone first (Safe, Mild, Danger, Breaking point), then by return / max drawdown, among scenarios that did not go broke (final equity is never the key).", "", "## Survivors", ""]
     for r in ok.to_dict("records"):
         L.append(f"{r['rank']}. **[{r['level_tag']}]** {r['strategy']} {r['tickers']} @ {int(r['allocation'])}% ({r['profile']}/{r['config_tag']}) - zone {r['zone']}; "
@@ -159,7 +161,7 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     res = allr.drop(columns=["group"]).copy()
     res["synthetic"] = synthetic
     res.to_csv(outp / "results.csv", index=False)
-    (outp / "verdicts.md").write_text(verdicts_md(ok, br, synthetic, lg.delta_source_summary()))
+    (outp / "verdicts.md").write_text(verdicts_md(ok, br, synthetic, lg.delta_source_summary(), lg.open_excluded_total()))
     ids = G.select_for_parquet(ok, br)
     G.write_parquet(outp, ids, series)
     # ways to lose
@@ -177,10 +179,14 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     nm = len(set(zip(lg.trades["profile"], lg.trades["config_tag"])))
     meta = {"synthetic": synthetic, "apy": o.apy, "spy": spy, "n_trades": len(lg.trades), "mc_run": not o.no_mc,
             "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"), "runs_desc": f"{len(lg.configs)} run(s), {nm} profile/config variants in {runs}",
-            "delta_source": lg.delta_source_summary(),
+            "delta_source": lg.delta_source_summary(), "open_excluded": lg.open_excluded_total(),
             "expiry_cap": "off" if o.expiry_cap is None else f"{o.expiry_cap:.0%} of a ticker's share per expiry", "cb": "off" if not o.cb else f"{o.cb}-day pause after a losing month",
             "mc_desc": "not run" if o.no_mc else f"{o.paths:,} paths, {o.block}-month blocks, seed {o.seed}, horizons 12 and 36 months; " + "bootstrap understates tails"}
-    ctx = {"meta": meta, "ok": ok, "br": br, "df": df, "series": series, "thermo_cfg": tcfg, "vix": vix, "ways": wtab, "analytic": an,
+    pcfg = playbooks.load_config(cdir / "playbooks.yaml")
+    pb = playbooks.build(df, series, lg.trades, st, spy, pcfg, synthetic=synthetic)
+    pb_path = playbooks.write_json(pb, o.playbooks_json or "results/playbooks.json")
+    (outp / "playbooks.md").write_text(playbooks.render_md(pb))
+    ctx = {"playbooks": pb, "meta": meta, "ok": ok, "br": br, "df": df, "series": series, "thermo_cfg": tcfg, "vix": vix, "ways": wtab, "analytic": an,
            "stress": st, "bp": bp, "mgmt": mg, "mixname": G.MIX}
     page = htmlreport.build_html(ctx)
     (outp / "index.html").write_text(page, encoding="utf-8")
@@ -188,7 +194,7 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     S = []
     S.append(f"{'SYNTHETIC ' if synthetic else ''}report -> {outp}/index.html ({len(page) / 1e6:.2f} MB)  | {CAVEAT}")
     S.append(f"scenarios {len(df):,}: survived {len(ok):,}, went broke {len(br):,}; zones " + ", ".join(f"{k} {v}" for k, v in df['zone'].value_counts().items()))
-    S.append(f"delta source: {lg.delta_source_summary()}")
+    S.append(f"delta source: {lg.delta_source_summary()}  | open trades excluded (expiry after last data date): {lg.open_excluded_total()}")
     S.append(f"parquet equity files: {len(ids)}  | {spy_msg}")
     S.append("top 5 by return/maxDD (not broke):")
     for r in ok[~ok["too_few_trades"]].head(5).to_dict("records"):
@@ -201,6 +207,7 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     nr = int((wtab.get("status", pd.Series(dtype=str)) != "ok").sum()) if "status" in wtab else 0
     S.append(f"  ({nr} row(s) 'not run')")
     S.append(bp["line"])
+    S.append(f"playbooks: {sum(p['status'] == 'ok' for p in pb['playbooks'])}/{len(pb['playbooks'])} picked, awards {sum(a['status'] == 'ok' for a in pb['awards'])}/{len(pb['awards'])} -> {pb_path}")
     S.append(f"stress rows {len(st)}; mgmt scorecard: {mg['n_configs']} configs vs baseline '{mg['baseline']}' - " + (", ".join(f"{k} {v}" for k, v in mg["table"]["label"].value_counts().items()) if len(mg["table"]) else "none"))
     S.append(f"done in {time.time() - t0:.0f}s")
     for s in S:

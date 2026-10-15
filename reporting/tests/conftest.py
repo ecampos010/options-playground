@@ -58,5 +58,5 @@ def synth_dir(tmp_path_factory):
 def report_dir(synth_dir, tmp_path_factory):
     from reporting.pipeline import ReportOptions, run_report
     out = tmp_path_factory.mktemp("rep") / "report_synth"
-    run_report(str(synth_dir), str(out), ReportOptions(paths=300, jobs=1, allocations=[5, 15, 50, 100]), log=lambda *_: None)
+    run_report(str(synth_dir), str(out), ReportOptions(paths=300, jobs=1, allocations=[5, 15, 50, 100], playbooks_json=str(out.parent / 'results' / 'playbooks.json')), log=lambda *_: None)
     return out

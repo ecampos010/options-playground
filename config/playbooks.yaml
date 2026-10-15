@@ -1,0 +1,58 @@
+# Thresholds for "Playbooks and Awards". Fractions (0.15 = 15%). Nothing here is hard-coded in the selectors.
+# ruin = Monte Carlo P(broke) over the thermometer's ruin horizon; dd = replay max drawdown.
+disclaimer: "backtest on one 10-year history, not a promise or advice"
+min_trades: 30                    # rows below this are flagged TOO FEW TRADES and excluded from every selector
+long_premium: [long_put, put_debit_spread, long_strangle]   # judged only by Big Short Style (they bleed in calm markets)
+playbooks:
+  capital_preservation:
+    title: "Capital Preservation"
+    nickname: "keep what you have"
+    filters: {positive_return: true, max_ruin: 0.005}
+    rank: {by: max_dd, order: asc}                # lowest max drawdown
+  conservative:
+    title: "Conservative"
+    nickname: "the boring way"
+    filters: {zones: [Safe]}
+    rank: {by: calmar, order: desc}               # return / max drawdown
+    compare_spy: true
+  moderate:
+    title: "Moderate"
+    nickname: "balanced"
+    filters: {zones: [Mild]}
+    rank: {by: calmar, order: desc}
+  max_safe_growth:
+    title: "Max Safe Growth"
+    nickname: "as much as Safe allows"
+    filters: {max_ruin: 0.01, max_dd: 0.15}
+    rank: {by: cagr, order: desc}
+  growth:
+    title: "Growth"
+    nickname: "accepting real drawdowns"
+    filters: {max_ruin: 0.20, max_dd: 0.50}
+    rank: {by: cagr, order: desc}
+  lottery:
+    title: "Lottery Ticket"
+    nickname: "luck-dependent"
+    filters: {}
+    rank: {by: final_equity, order: desc}         # the ONLY selector allowed to rank on final equity
+    luck_dependent: true
+  big_short:
+    title: "Big Short Style"
+    nickname: "long premium: bleeds in calm, pays in crashes"
+    kind: stress
+    strategies: [long_put, put_debit_spread, long_strangle]
+    # regexes matched against stress window names (stress_<name>); P&L is summed over the matching windows
+    stress_windows: ["feb2018|volmageddon2018", "covid", "2022"]
+awards:
+  highest_win_rate:
+    title: "Highest Win Rate"
+    rank: {by: win_rate, order: desc}
+  highest_roi:
+    title: "Highest ROI / CAGR"
+    rank: {by: cagr, order: desc}
+  happy_medium:
+    title: "Happy Medium"
+    zone: Mild
+    calmar_quantile: 0.5          # keep Mild rows at or above this quantile of Mild return/maxDD, then take the one closest to the median config
+  worst_performance:
+    title: "Worst Performance"
