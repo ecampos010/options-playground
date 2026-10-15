@@ -114,6 +114,8 @@ Offline demo: add `--provider synthetic` to `run`, `sweep`, `stress`, `plan`. Ru
 | spot | `--spot-source alpaca/parity/daily`, `--spot-fallback parity/none` (missing days are never interpolated) |
 | sizing | `--sizing equity-pct` (budget % of current equity) or `fixed1` (unit mode: 1 contract, no budget, circuit breaker off) |
 
+`--spot-source daily` enters at the 16:00 close and checks breaches/triggers on daily bars only (a result always exists, but it is a coarser study).
+
 Interpretation notes (check these): a roll targets a short strike at `spot*(1-+roll_to_pct)` (default 1%), required to be
 closer to spot than the old short; `roll_condor` returns both shorts to their ENTRY distances from the current spot (both
 follow the move); stop = loss >= (N-1) x credit on the NATURAL close cost; counterfactual = original structure's expiry
