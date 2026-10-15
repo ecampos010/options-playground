@@ -126,7 +126,8 @@ def make_provider(args, cfg: Config, fetcher=None):
     return ThetaProvider(DataCache(args.data_dir), fetcher)
 
 
-def get_events(args, cfg: Config, provider):
+def get_events(args, cfg: Config, provider, required: bool = True):
+    """required=False (used by `plan`): a missing events file only warns; the earnings/FOMC filters are treated as off."""
     need = cfg.event_buffer or cfg.earnings_filter
     if not need:
         return None, "off"
@@ -135,6 +136,11 @@ def get_events(args, cfg: Config, provider):
         return load_events(p), str(p)
     if provider.name == "synthetic":
         return provider.synthetic_events(), "SYNTHETIC-calendar(not real dates)"
+    if not required:
+        print(f"WARNING: events file not found: {p}. Continuing with the earnings/FOMC event filters DISABLED for this "
+              "plan (candidate-day counts are an upper bound). Create it from templates/events.csv.template with real "
+              "dates to include them.", file=sys.stderr)
+        return None, "off (events file missing)"
     raise EventsFileMissing(
         f"events file not found: {p}\nCreate it from templates/events.csv.template with real dates "
         "(see README) or run with --event-buffer off. Dates are never invented.")
@@ -202,7 +208,7 @@ def cmd_plan(args):
     from .planner import make_plan
     cfg = make_cfg(args)
     prov = make_provider(args, cfg)
-    ev, note = get_events(args, cfg, prov)
+    ev, note = get_events(args, cfg, prov, required=False)
     daily, vix = prov.get_underlying_daily(), prov.get_vix_daily()
     evx = EventIndex(ev, list(daily.index)) if ev is not None else None
     print(make_plan(cfg, daily, vix, evx, threads=(2, 4), max_rps=args.max_rps, entry_fetch=args.entry_fetch,
@@ -222,14 +228,8 @@ def cmd_download(args):
     from .theta_provider import ThetaProvider
     cfg = make_cfg(args)
     cache = DataCache(args.data_dir)
-    log_f = cache.root / "state" / "download.log"
-    log_f.parent.mkdir(parents=True, exist_ok=True)
-
-    def log(*a):
-        msg = time.strftime("%H:%M:%S ") + " ".join(map(str, a))
-        print(msg, file=sys.stderr, flush=True)
-        with open(log_f, "a") as f:
-            f.write(msg + "\n")
+    from .downloader import make_logger
+    log = make_logger(cache.root / "state" / "download.log")
 
     client = _client(args)
     end = date.fromisoformat(cfg.end_date) if cfg.end_date else date.today() - timedelta(days=1)
@@ -278,7 +278,8 @@ def cmd_download(args):
         if args.cover_matrix:   # superset of every matrix variant's entry days
             cover = apply_overrides(cfg, {"gate": False, "upside_guard": False, "cb_days": 0})
         if not args.no_stage_a:
-            status["stage_a"] = stage_a(prov, fetcher, cover, evx, log, threads=args.threads, limit=args.limit_days)
+            status["stage_a"] = stage_a(prov, fetcher, cover, evx, log, threads=args.threads, limit=args.limit_days,
+                                       progress_every=args.progress_every)
         cfgs = [("run", cfg)] if not args.cover_matrix else list(matrix_configs(cfg))
         for name, c in cfgs:
             log(f"stage B / on-demand pass: {name}")
@@ -336,6 +337,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-stage-a", action="store_true")
     p.add_argument("--cover-matrix", action="store_true", help="fetch what all 8 matrix variants need")
     p.add_argument("--limit-days", type=int, default=None)
+    p.add_argument("--progress-every", type=int, default=50, help="print a progress line (entry date, count, total, ETA) every N requests")
     p.add_argument("--fake", action="store_true", help="offline simulator instead of a Theta Terminal")
     p.add_argument("--engine", choices=["green", "lab"], default="green")
     p.add_argument("--tickers", default="SPY")

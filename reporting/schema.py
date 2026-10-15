@@ -38,6 +38,32 @@ class Logs:
     configs: dict = field(default_factory=dict)   # run_id -> config.json dict
     synthetic: bool = False
     problems: list = field(default_factory=list)  # (severity, run, message)
+    delta_sources: dict = field(default_factory=dict)   # run_id -> "theta_greeks" | "bs_fallback" | "mixed" | "unknown"
+
+    def delta_source_summary(self) -> str:
+        """One line for report headers: how many runs used which delta source."""
+        if not self.delta_sources:
+            return "unknown"
+        n: dict = {}
+        for v in self.delta_sources.values():
+            n[v] = n.get(v, 0) + 1
+        return ", ".join(f"{k} x{v}" for k, v in sorted(n.items()))
+
+
+def read_delta_source(run_dir: Path) -> str:
+    """meta.json -> delta_source_tag; derived from the older delta_source counts when the tag is absent."""
+    try:
+        meta = json.loads((Path(run_dir) / "meta.json").read_text())
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    tag = meta.get("delta_source_tag")
+    if tag:
+        return str(tag)
+    c = meta.get("delta_source")
+    if isinstance(c, dict):
+        prov, bs_ = c.get("provider", 0), c.get("bs_mid_iv", 0)
+        return "theta_greeks" if prov and not bs_ else ("mixed" if prov else "bs_fallback")
+    return "unknown"
 
 
 def _read_csv(path: Path, **kw) -> pd.DataFrame:
@@ -164,17 +190,21 @@ def validate_frames(rid: str, t: pd.DataFrame, m: pd.DataFrame, b: pd.DataFrame)
 
 def load_runs(root: str | Path) -> Logs:
     root = Path(root)
-    dirs = sorted(p for p in root.iterdir() if p.is_dir() and (p / "trades.csv").exists()) if root.exists() else []
+    if root.exists() and (root / "trades.csv").exists():      # a single run folder
+        dirs = [root.resolve()]
+    else:                                                      # a parent folder of runs
+        dirs = sorted(p for p in root.iterdir() if p.is_dir() and (p / "trades.csv").exists()) if root.exists() else []
     problems: list = []
     if not root.exists():
         problems.append(("error", str(root), "runs directory does not exist"))
     elif not dirs:
-        problems.append(("error", str(root), "no runs/*/trades.csv found"))
-    ts, ms, bs, cfgs = [], [], [], {}
+        problems.append(("error", str(root), "no trades.csv here or in any subfolder (expected a run folder or a folder of runs)"))
+    ts, ms, bs, cfgs, dsrc = [], [], [], {}, {}
     for d in dirs:
         t, m, b, cfg, pr = load_run(d)
         problems += pr
         cfgs[d.name] = cfg
+        dsrc[d.name] = read_delta_source(d)
         if not t.empty:
             ts.append(t)
             ms.append(m)
@@ -183,7 +213,7 @@ def load_runs(root: str | Path) -> Logs:
     marks = pd.concat(ms, ignore_index=True) if ms else pd.DataFrame(columns=MARK_COLS + ["uid"])
     blocked = pd.concat(bs, ignore_index=True) if bs else pd.DataFrame(columns=BLOCKED_COLS + ["run_id"])
     synth = bool(cfgs) and any(bool(c.get("synthetic")) for c in cfgs.values())
-    return Logs(trades, marks, blocked, cfgs, synth, problems)
+    return Logs(trades, marks, blocked, cfgs, synth, problems, dsrc)
 
 
 def validate_cli(root: str) -> int:
@@ -191,6 +221,7 @@ def validate_cli(root: str) -> int:
     errs = [p for p in lg.problems if p[0] == "error"]
     for sev, run, msg in lg.problems:
         print(f"[{sev.upper()}] {run}: {msg}")
+    print(f"delta source: {lg.delta_source_summary()}")
     print(f"{len(lg.trades)} trades, {len(lg.marks)} marks, {len(lg.blocked)} blocked rows; "
           f"{len(errs)} error(s), {len(lg.problems) - len(errs)} warning(s)"
           + ("  [SYNTHETIC]" if lg.synthetic else ""))

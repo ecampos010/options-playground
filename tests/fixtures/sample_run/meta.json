@@ -30,6 +30,7 @@
     "provider": 0,
     "bs_mid_iv": 4547
   },
+  "delta_source_tag": "bs_fallback",
   "unit_mode": true,
   "notes": [],
   "events": "SYNTHETIC-calendar(not real dates)",

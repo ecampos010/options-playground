@@ -7,6 +7,7 @@ Status (ThetaData STANDARD options account, Terminal v3, checked on a VPS):
   VERIFIED   HTTP 472 "No data found" (empty body) = contract not listed/tradable that date -> NO_DATA,
              not an error: never retried, cached as a negative result, counted separately.
   NOT AVAILABLE on this account: stock and index history (HTTP 403; Stock/Index = FREE tier).
+  VERIFIED   /v3/option/history/greeks/first_order (Standard); /greeks/all is Pro-only and refused on Standard.
   UNVERIFIED (TODO-VERIFY): bulk strike=*, option EOD, v2 fallbacks.
 ALL endpoint paths and parameter names live in `EP` / `P` below.
 
@@ -34,7 +35,9 @@ class EP:
     STRIKES = "/v3/option/list/strikes"               # VERIFIED (Standard)
     OPT_QUOTE = "/v3/option/history/quote"            # VERIFIED single contract (Standard); bulk form TODO-VERIFY
     OPT_EOD = "/v3/option/history/eod"                # TODO-VERIFY
-    OPT_GREEKS = "/v3/option/history/greeks/all"      # TODO-VERIFY (delta, implied_vol, underlying_price fields?)
+    # VERIFIED (Standard): first-order Greeks. /greeks/all (2nd/3rd order) is Pro-only and is refused on Standard.
+    OPT_GREEKS = "/v3/option/history/greeks/first_order"
+    OPT_GREEKS_PRO = "/v3/option/history/greeks/all"  # Pro only; not used
     STK_QUOTE = "/v3/stock/history/quote"             # 403 on Standard account (Stock: FREE)
     STK_EOD = "/v3/stock/history/eod"                 # 403 on Standard account
     IDX_PRICE = "/v3/index/history/price"             # 403 on Standard account (Index: FREE)
@@ -60,6 +63,44 @@ class P:
     @staticmethod
     def t(minute: int) -> str:
         return f"{minute // 60:02d}:{minute % 60:02d}:00"
+
+
+# VERIFIED first_order columns: symbol,expiration,strike,right,timestamp,bid,ask,delta,theta,vega,rho,epsilon,lambda,
+# implied_vol,iv_error,underlying_timestamp,underlying_price.  Params: expiration/date as YYYY-MM-DD.
+IV_ERROR_MAX = 0.05          # |iv_error| above this = the IV solver did not converge -> junk row
+IV_ERROR_SENTINEL = 100.0    # ThetaData writes iv_error=100 when it could not solve (e.g. the 09:30 row, bid=ask=0)
+STALE_UNDERLYING_S = 120.0   # underlying_timestamp older than the bar by more than this = stale opening bar
+
+
+def iso(x: date) -> str:
+    return x.strftime("%Y-%m-%d")
+
+
+def junk_greeks_mask(df: pd.DataFrame) -> pd.Series:
+    """True for rows that must not be used as a delta source: zero/missing bid or ask, IV solver error above
+    IV_ERROR_MAX (incl. the 100.0 sentinel), non-finite delta, or a stale underlying timestamp. Columns that are
+    absent from the frame are not tested."""
+    bad = pd.Series(False, index=df.index)
+    for c in ("bid", "ask"):
+        if c in df:
+            v = pd.to_numeric(df[c], errors="coerce")
+            bad |= ~(v > 0)
+    if "iv_error" in df:
+        e = pd.to_numeric(df["iv_error"], errors="coerce")
+        bad |= ~(e.abs() <= IV_ERROR_MAX)          # NaN, 100.0 sentinel and anything above the threshold
+    if "delta" in df:
+        d = pd.to_numeric(df["delta"], errors="coerce")
+        bad |= ~d.abs().between(0.0, 1.0)          # NaN or outside [-1, 1]
+    if "timestamp" in df and "underlying_timestamp" in df:
+        lag = (pd.to_datetime(df["timestamp"], errors="coerce") -
+               pd.to_datetime(df["underlying_timestamp"], errors="coerce")).dt.total_seconds()
+        bad |= lag > STALE_UNDERLYING_S
+    return bad
+
+
+def is_junk_quote(bid: float, ask: float) -> bool:
+    """A quote row with no market on at least one side (bid==0 or ask==0, NaN, or crossed)."""
+    return not (bid > 0 and ask > 0 and bid <= ask)
 
 
 CONCURRENCY_CAP = 4   # ThetaData Standard allows 4 concurrent requests (Value: 2); hard cap regardless of --threads
@@ -211,7 +252,10 @@ class ThetaClient:
             out[c] = df[c].astype(float)
         for c in ("bid_size", "ask_size"):
             out[c] = df[c].astype(float) if c in df else float("nan")
-        return out[cols]
+        # no-market rows (bid==0 AND ask==0, e.g. the 09:30 opening print) carry no information: drop them.
+        # One-sided rows (bid 0, ask > 0) are kept here - they are legitimate far-OTM wings; Greeks rows use the stricter rule.
+        out = out[~((out["bid"].fillna(0) == 0) & (out["ask"].fillna(0) == 0))]
+        return out[cols].reset_index(drop=True)
 
     # ------------------------------------------------------------ endpoints
     def expirations(self, symbol="SPY") -> tuple[list[date], ApiResult]:
@@ -254,10 +298,12 @@ class ThetaClient:
 
     def greeks_bulk(self, expiry: date, d: date, interval: str, t0: int, t1: int, symbol="SPY",
                     strike: float | None = None, right: str | None = None):
-        """Greeks at one bar: all strikes (strike=*) or one contract. TODO-VERIFY endpoint, params and columns
-        (expected: delta, implied_vol, underlying_price). Returns (DataFrame right,strike,delta,iv,underlying_price, r)."""
-        p = {P.symbol: symbol, P.expiration: P.d(expiry), P.strike: P.BULK_STRIKE if strike is None else P.strike_val(strike),
-             P.right: P.BOTH if right is None else P.RIGHT[right], P.interval: interval, P.date: P.d(d),
+        """First-order Greeks at one bar: all strikes (strike=*) or one contract.
+        VERIFIED endpoint/columns (see EP.OPT_GREEKS). Junk rows (bid/ask 0, |iv_error| > IV_ERROR_MAX, stale underlying)
+        are dropped and counted in stats['greeks_rejected']. -> (DataFrame right,strike,delta,iv,underlying_price, r)."""
+        p = {P.symbol: symbol, P.expiration: iso(expiry),
+             P.strike: P.BULK_STRIKE if strike is None else P.strike_val(strike),
+             P.right: P.BOTH if right is None else P.RIGHT[right], P.interval: interval, P.date: iso(d),
              P.start_time: P.t(t0), P.end_time: P.t(t1)}
         r = self.get(EP.OPT_GREEKS, p)
         cols = ["right", "strike", "delta", "iv", "underlying_price"]
@@ -265,13 +311,18 @@ class ThetaClient:
             return pd.DataFrame({c: pd.Series([], dtype=float if c != "right" else object) for c in cols}), r
         df = self.parse(r.text)
         df.columns = [c.lower() for c in df.columns]
+        junk = junk_greeks_mask(df)
+        if junk.any():
+            with self._lock:
+                self.stats["greeks_rejected"] = self.stats.get("greeks_rejected", 0) + int(junk.sum())
+            df = df[~junk]
         out = pd.DataFrame({
             "right": df["right"].astype(str).str.upper().str[0] if "right" in df else (right or ""),
             "strike": df["strike"].astype(float) if "strike" in df else strike,
             "delta": df["delta"].astype(float) if "delta" in df else float("nan"),
             "iv": next((df[c].astype(float) for c in ("implied_vol", "iv", "implied_volatility") if c in df), float("nan")),
             "underlying_price": df["underlying_price"].astype(float) if "underlying_price" in df else float("nan")})
-        return out[cols], r
+        return out[cols].reset_index(drop=True), r
 
     def option_eod(self, expiry: date, right: str, strike: float, d0: date, d1: date, symbol="SPY"):
         p = {P.symbol: symbol, P.expiration: P.d(expiry), P.strike: P.strike_val(strike),

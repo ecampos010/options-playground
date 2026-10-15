@@ -116,9 +116,10 @@ def stress_md(st: pd.DataFrame, bp_md: str, synthetic: bool) -> str:
     return "\n".join(L) + "\n\n" + bp_md
 
 
-def verdicts_md(ok, br, synthetic) -> str:
+def verdicts_md(ok, br, synthetic, delta_source: str = "unknown") -> str:
     L = ["# Verdicts", "", f"> {CAVEAT}"] + (["> **SYNTHETIC** - generated fixtures, not market data."] if synthetic else []) + [
-        "", "Ranked by return / max drawdown among scenarios that did not go broke (final equity is never the key).", "", "## Survivors", ""]
+        "", f"Delta source in these logs: **{delta_source}** (theta_greeks = ThetaData first_order Greeks; bs_fallback = Black-Scholes from mid IV).",
+        "", "Ranked within thermometer zone first (Safe, Mild, Danger, Breaking point), then by return / max drawdown, among scenarios that did not go broke (final equity is never the key).", "", "## Survivors", ""]
     for r in ok.to_dict("records"):
         L.append(f"{r['rank']}. **[{r['level_tag']}]** {r['strategy']} {r['tickers']} @ {int(r['allocation'])}% ({r['profile']}/{r['config_tag']}) - zone {r['zone']}; "
                  f"ret/DD {r['calmar']:.2f}, final ${r['final_equity']:,.0f}. {r['verdict']}")
@@ -158,7 +159,7 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     res = allr.drop(columns=["group"]).copy()
     res["synthetic"] = synthetic
     res.to_csv(outp / "results.csv", index=False)
-    (outp / "verdicts.md").write_text(verdicts_md(ok, br, synthetic))
+    (outp / "verdicts.md").write_text(verdicts_md(ok, br, synthetic, lg.delta_source_summary()))
     ids = G.select_for_parquet(ok, br)
     G.write_parquet(outp, ids, series)
     # ways to lose
@@ -176,6 +177,7 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     nm = len(set(zip(lg.trades["profile"], lg.trades["config_tag"])))
     meta = {"synthetic": synthetic, "apy": o.apy, "spy": spy, "n_trades": len(lg.trades), "mc_run": not o.no_mc,
             "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"), "runs_desc": f"{len(lg.configs)} run(s), {nm} profile/config variants in {runs}",
+            "delta_source": lg.delta_source_summary(),
             "expiry_cap": "off" if o.expiry_cap is None else f"{o.expiry_cap:.0%} of a ticker's share per expiry", "cb": "off" if not o.cb else f"{o.cb}-day pause after a losing month",
             "mc_desc": "not run" if o.no_mc else f"{o.paths:,} paths, {o.block}-month blocks, seed {o.seed}, horizons 12 and 36 months; " + "bootstrap understates tails"}
     ctx = {"meta": meta, "ok": ok, "br": br, "df": df, "series": series, "thermo_cfg": tcfg, "vix": vix, "ways": wtab, "analytic": an,
@@ -186,6 +188,7 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     S = []
     S.append(f"{'SYNTHETIC ' if synthetic else ''}report -> {outp}/index.html ({len(page) / 1e6:.2f} MB)  | {CAVEAT}")
     S.append(f"scenarios {len(df):,}: survived {len(ok):,}, went broke {len(br):,}; zones " + ", ".join(f"{k} {v}" for k, v in df['zone'].value_counts().items()))
+    S.append(f"delta source: {lg.delta_source_summary()}")
     S.append(f"parquet equity files: {len(ids)}  | {spy_msg}")
     S.append("top 5 by return/maxDD (not broke):")
     for r in ok[~ok["too_few_trades"]].head(5).to_dict("records"):

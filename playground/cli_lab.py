@@ -196,7 +196,8 @@ def cmd_download_lab(args):
     base = make_cfg(args)
     client = _client(args)
     root = DataCache(args.data_dir)
-    log = lambda *a: print(*a, file=sys.stderr, flush=True)
+    from .downloader import make_logger
+    log = make_logger(Path(args.data_dir) / "state" / "download.log")
     end = date.fromisoformat(base.end_date) if base.end_date else date.today() - timedelta(days=1)
     start = date.fromisoformat(base.start_date) if base.start_date else end - timedelta(days=365 * args.years)
     if not args.fake:
@@ -241,7 +242,8 @@ def cmd_download_lab(args):
         try:
             if not cache.expirations():
                 fetcher.fetch_expirations()
-            status["stage_a"] = stage_a(prov, fetcher, cfg, evx, log, threads=args.threads, limit=args.limit_days, lab=True)
+            status["stage_a"] = stage_a(prov, fetcher, cfg, evx, log, threads=args.threads, limit=args.limit_days, lab=True,
+                                       progress_every=args.progress_every)
             if not status["stage_a"]["stopped"]:
                 res = run_lab(prov, apply_overrides(cfg, {"sizing": "fixed1"}), ev, note)
                 status["stage_b_pass"] = {"trades": len(res.trades), "gaps": res.meta["spot_coverage"]["days_without_spot"]}
@@ -270,7 +272,7 @@ def cmd_plan_lab(args):
             continue
         if vix is None:
             vix = prov.get_vix_daily()
-            ev, note = get_events(args, base, prov)
+            ev, note = get_events(args, base, prov, required=False)
     if not dailies:
         print("no daily data - run `spot` / `download --daily-only` first")
         return 2
@@ -309,7 +311,7 @@ def register(sp):
     p.add_argument("--data-dir", default="data")
     p.add_argument("--results-dir", default="results")
     p.add_argument("--coverage-only", action="store_true")
-    p.add_argument("--validate", default="", help="comma list: massive,greeks,parity")
+    p.add_argument("--validate", default="", help="comma list: massive (dates >= 2024-10-16 only),greeks,parity,dailyclose")
     p.add_argument("--sample-days", type=int, default=6)
     p.add_argument("--minutes-per-day", type=int, default=25)
     p.add_argument("--mark-bad", type=onoff, default=True, help="flag days with median abs diff > $0.25 so the engine falls back")

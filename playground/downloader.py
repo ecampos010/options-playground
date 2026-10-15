@@ -22,6 +22,60 @@ from .provider import CLOSE_MIN, OPEN_MIN, MissingData, bar_minutes
 from .theta_client import ThetaClient
 
 
+def make_logger(log_path, echo=None):
+    """Timestamped logger that appends to log_path and echoes to stderr. Never logs request params with credentials
+    (the client holds none)."""
+    import sys
+    path = __import__("pathlib").Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = threading.Lock()
+
+    def log(*a):
+        msg = time.strftime("%Y-%m-%d %H:%M:%S ") + " ".join(map(str, a))
+        with lock:
+            print(msg, file=echo or sys.stderr, flush=True)
+            with open(path, "a") as f:
+                f.write(msg + "\n")
+    return log
+
+
+def fmt_eta(sec: float) -> str:
+    sec = max(0, int(sec))
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
+
+
+class Progress:
+    """Prints a line every `every` requests (and at the end): entry date, entry days done / total, requests, ETA.
+    ETA uses the rate of the most recent completions so cached (instant) days at the start of a resumed run do not
+    make it look too optimistic for long."""
+
+    def __init__(self, log, total: int, client, every: int = 50, symbol: str = "", window: int = 20):
+        self.log, self.total, self.client, self.every, self.symbol = log, total, client, max(1, every), symbol
+        self.t0 = time.time()
+        self.req0 = client.stats["requests"]
+        self.last_req = self.req0
+        self.recent: list[tuple[float, int]] = []
+        self.window = window
+        self.done = 0
+
+    def tick(self, d, force: bool = False):
+        self.done += 1
+        now = time.time()
+        self.recent = (self.recent + [(now, self.done)])[-self.window:]
+        req = self.client.stats["requests"]
+        if not force and req - self.last_req < self.every and self.done != self.total:
+            return
+        self.last_req = req
+        left = self.total - self.done
+        if len(self.recent) >= 2 and self.recent[-1][0] > self.recent[0][0]:
+            rate = (self.recent[-1][1] - self.recent[0][1]) / (self.recent[-1][0] - self.recent[0][0])
+        else:
+            rate = self.done / max(now - self.t0, 1e-9)
+        eta = fmt_eta(left / rate) if rate > 0 else "?"
+        self.log(f"stage A {self.symbol} entry {d} | {self.done}/{self.total} entry days | "
+                 f"{req - self.req0} requests this run | {self.client.stats['bytes'] / 1e6:.1f} MB | ETA {eta}")
+
+
 class FetchError(MissingData):
     pass
 
@@ -234,7 +288,7 @@ class Fetcher:
 
 
 def stage_a(provider, fetcher: Fetcher, cfg: Config, evx, log, threads: int = 2, limit: int | None = None,
-            lab: bool = False, tinfo=None) -> dict:
+            lab: bool = False, tinfo=None, progress_every: int = 50) -> dict:
     """Prefetch the narrow entry snapshot for every candidate day (resumable).
     lab=True: only the cadence's entry days; delta mode fetches ONE bulk snapshot per expiry (no +/-10 strike band)."""
     from .lab import entry_schedule
@@ -302,15 +356,21 @@ def stage_a(provider, fetcher: Fetcher, cfg: Config, evx, log, threads: int = 2,
         except MissingData as ex:
             return d, str(ex)
 
+    # resumable: days whose items are all cached finish without requests, so a re-run skips straight through them
+    prog = Progress(log, len(days), fetcher.client, progress_every, fetcher.symbol)
+    log(f"stage A {fetcher.symbol}: {len(days)} entry days to cover (cached items are skipped); "
+        f"progress line every {progress_every} requests")
     with ThreadPoolExecutor(max(1, min(threads, 4))) as pool:
-        for n, (d, err) in enumerate(pool.map(work, days), 1):
+        for d0, (d, err) in zip(days, pool.map(work, days)):
             if err == "budget":
+                prog.tick(d0)
                 continue
+            if err:
+                log(f"stage A {fetcher.symbol} entry {d0}: {err[:200]}")
             (errors if err else done).append((d, err) if err else d)
-            if n % 25 == 0 or n == len(days):
-                el = time.time() - t_start
-                log(f"stage A {fetcher.symbol} {n}/{len(days)} days | {fetcher.client.stats['requests']} req | "
-                    f"{fetcher.client.stats['bytes'] / 1e6:.1f} MB | {el:.0f}s")
+            prog.tick(d0)
+        log(f"stage A {fetcher.symbol} finished: {len(done)} ok, {len(errors)} with errors, "
+            f"{fetcher.client.stats['requests']} requests, {time.time() - t_start:.0f}s")
     return {"candidates": len(days), "done": len(done), "errors": errors, "stopped": sorted(set(stopped))}
 
 
