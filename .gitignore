@@ -7,3 +7,9 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# reporting layer outputs (regenerate with python -m reporting ...)
+runs/
+runs_synth/
+report/
+report_synth/

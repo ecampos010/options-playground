@@ -1,0 +1,8 @@
+# Editable zone thresholds. A scenario gets the FIRST zone whose limits it satisfies (strict "<").
+# ruin = Monte Carlo P(broke) over ruin_horizon_months; dd = max drawdown (fraction).
+ruin_horizon_months: 36
+zones:
+  - {name: "Safe",           ruin: 0.01, dd: 0.15}
+  - {name: "Mild",           ruin: 0.05, dd: 0.30}
+  - {name: "Danger",         ruin: 0.20, dd: 0.50}
+fallback_zone: "Breaking point"   # anything worse, or any broke scenario
