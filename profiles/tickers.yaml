@@ -1,0 +1,28 @@
+# Per-ticker configuration. Strike grids differ by ticker and era: the engine reads LISTED strikes from the data
+# and never assumes an increment; the notes below are only expectations that `probe` reports on (TODO-VERIFY).
+# width_fixed: dollar width used instead of width_pct*spot (SPY keeps the Green $5 wing); null = percent of spot.
+SPY:
+  width_fixed: 5.0
+  vol_index: null
+  options_symbol: SPY
+  notes: "$1 strikes near the money since ~2016 (TODO-VERIFY); daily expirations from 2022; American, ex-div quarterly"
+QQQ:
+  width_fixed: null
+  vol_index: VXN
+  options_symbol: QQQ
+  notes: "$1 strikes (TODO-VERIFY era changes); weekly then daily expirations; ex-div quarterly"
+IWM:
+  width_fixed: null
+  vol_index: RVX
+  options_symbol: IWM
+  notes: "$1 strikes, $0.50 in some eras (TODO-VERIFY); ex-div quarterly"
+GLD:
+  width_fixed: null
+  vol_index: GVZ
+  options_symbol: GLD
+  notes: "$1 strikes, wider far OTM (TODO-VERIFY); fewer expirations; ex-div none/rare"
+TLT:
+  width_fixed: null
+  vol_index: null
+  options_symbol: TLT
+  notes: "$1 strikes, $0.50 in some eras (TODO-VERIFY); ex-div MONTHLY (early-assignment risk on short calls)"

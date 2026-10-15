@@ -1,0 +1,10 @@
+# Level 4 experiment: all guardrails off, short strikes at ~30 delta (range of interest 25-35).
+tier: "experiment"
+level: 4
+gate: false
+upside_guard: false
+event_buffer: false
+cb_days: 0
+earnings_filter: false
+term_filter: false
+strike_rule: {"mode": "delta", "put_delta": 0.30, "call_delta": 0.30}

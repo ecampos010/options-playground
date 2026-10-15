@@ -1,3 +1,4 @@
 # E1: allow entry on CPI/PPI/NFP/FOMC event days, after the release time.
 tier: "yellow"
+level: 2
 event_dayof_allowed: ["CPI", "PPI", "NFP", "FOMC"]

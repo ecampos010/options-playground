@@ -71,6 +71,37 @@ class Provider:
     def synthetic_events(self):
         return None
 
+    # --- lab-engine extensions (defaults keep older providers working) -------------------------
+    ticker = "SPY"
+
+    def confirm_expiry(self, d: date, expiry: date, cfg, minute: int, spot: float, vix: float) -> bool:
+        return expiry in self.list_expiries(d)
+
+    def get_vix3m_daily(self):
+        """VIX3M daily close or None (term-structure filter is skipped when absent)."""
+        return None
+
+    def get_exdiv_dates(self) -> list[date]:
+        """Ex-dividend dates of the underlying (empty if unknown)."""
+        return []
+
+    def spot_bars(self, d: date, res: str, source: str = "alpaca", fallback: str = "parity"):
+        """-> (DataFrame ts,spot ; source_used). Raises MissingData when no usable spot exists for the day."""
+        return self.get_underlying_bars(d, res), "provider"
+
+    def chain_snapshot(self, d: date, expiry: date, minute: int, res: str, spot: float) -> pd.DataFrame:
+        """All strikes within +/-25% of spot at one bar: right,strike,bid,ask[,delta,iv]. Rows only for valid quotes.
+        Real-data providers fetch this as ONE bulk request (Stage A for delta mode)."""
+        ks = [k for k in self.list_strikes(d, expiry) if 0.75 * spot <= k <= 1.25 * spot]
+        frames = []
+        for r in ("P", "C"):
+            q = self.get_option_quotes(d, expiry, r, ks, minute, minute, res)
+            if len(q):
+                frames.append(q.assign(right=r))
+        if not frames:
+            return pd.DataFrame(columns=["right", "strike", "bid", "ask"])
+        return pd.concat(frames, ignore_index=True)[["right", "strike", "bid", "ask"]]
+
 
 # ======================================================================= synthetic
 def _hash_u(d_ord: int, e_ord: int, right_i: int, strikes: np.ndarray, bars: np.ndarray) -> np.ndarray:
@@ -98,8 +129,12 @@ class SyntheticProvider(Provider):
     SPIKE_LEN = 14
 
     def __init__(self, start="2015-01-02", end="2025-12-31", seed=7, s0=200.0, r=0.04,
-                 warmup_days=30):
+                 warmup_days=30, ticker="SPY", vol_scale=1.0, strike_step=1.0, skew=True, provider_greeks=False,
+                 step_by_year=None):
         self.r = r
+        self.ticker, self.vol_scale, self.skew, self.provider_greeks = ticker, vol_scale, skew, provider_greeks
+        self.strike_step, self.step_by_year = strike_step, step_by_year or {}
+        idio = None if ticker == "SPY" else np.random.default_rng([seed, sum(map(ord, ticker))])
         s = pd.Timestamp(start).date() - timedelta(days=int(warmup_days * 1.6))
         self.days = nyse_days(s, pd.Timestamp(end).date())
         n = len(self.days)
@@ -118,6 +153,8 @@ class SyntheticProvider(Provider):
                 ep_start = i
             k = i - ep_start if ep_start is not None and i - ep_start < self.SPIKE_LEN else None
             e_v, e_s = rng.standard_normal(2)
+            if idio is not None:                      # non-SPY: own idiosyncratic shock, shared VIX path
+                e_s = idio.standard_normal()
             x += 0.05 * (math.log(16.0) - x) + 0.05 * e_v
             extra = 0.0
             if k is not None:
@@ -127,12 +164,12 @@ class SyntheticProvider(Provider):
                 else:
                     extra = 0.006
             v = float(np.clip(math.exp(x), 9.0, 80.0))
-            sig = v / 100 * 0.85 / math.sqrt(252)
+            sig = v / 100 * 0.85 / math.sqrt(252) * vol_scale
             z = -0.7 * e_v + math.sqrt(1 - 0.49) * e_s
             ret = 0.0004 + sig * z + extra
             c = prev * math.exp(ret)
             o = prev * math.exp(0.3 * ret + 0.1 * sig * rng.standard_normal())
-            w = np.random.default_rng([seed, i]).standard_normal(78) * (sig * 0.8 / math.sqrt(78))
+            w = np.random.default_rng([seed, i] + ([] if ticker == "SPY" else [sum(map(ord, ticker))])).standard_normal(78) * (sig * 0.8 / math.sqrt(78))
             W = np.concatenate([[0.0], np.cumsum(w)])
             bridge = W - (np.arange(79) / 78.0) * W[-1]
             path = o * np.exp(math.log(c / o) * np.arange(79) / 78.0 + bridge)
@@ -144,6 +181,8 @@ class SyntheticProvider(Provider):
         self._vix = pd.Series(vix, index=self.days, name="vix")
         self._first = bisect.bisect_left(self.days, pd.Timestamp(start).date())
         self._expiry_pool = [d for d in self.days if d.weekday() in (0, 2, 4)]
+        ew = pd.Series(vix).ewm(span=40).mean().to_numpy()
+        self._vix3m = pd.Series(0.7 * ew + 0.3 * 18.0, index=self.days, name="vix3m")
         self._leg_cache: OrderedDict = OrderedDict()
         self._bar_cache: dict = {}
 
@@ -172,12 +211,25 @@ class SyntheticProvider(Provider):
 
     def list_expiries(self, d):
         i = bisect.bisect_right(self._expiry_pool, d)
-        j = bisect.bisect_right(self._expiry_pool, d + timedelta(days=75))
+        j = bisect.bisect_right(self._expiry_pool, d + timedelta(days=125))
         return self._expiry_pool[i:j]
+
+    def get_vix3m_daily(self):
+        return self._vix3m.iloc[self._first - 6:]
+
+    def get_exdiv_dates(self):
+        out = []
+        for y in sorted({x.year for x in self.days}):
+            for m in (3, 6, 9, 12):
+                f = date(y, m, 1)
+                out.append(f + timedelta(days=(4 - f.weekday()) % 7 + 14))     # third Friday (synthetic ex-div)
+        return [x for x in out if self.days[0] <= x <= self.days[-1]]
 
     def list_strikes(self, d, expiry):
         s = float(self._daily.close.iloc[self._pos[d]])
-        return [float(k) for k in range(int(0.7 * s), int(1.3 * s) + 2)]
+        step = self.step_by_year.get(d.year, self.strike_step)
+        lo, hi = int(0.7 * s / step), int(1.3 * s / step) + 2
+        return [round(k * step, 3) for k in range(max(1, lo), hi)]
 
     def _quote_block(self, d, expiry, right, strikes, mins):
         i = self._pos[d]
@@ -185,7 +237,7 @@ class SyntheticProvider(Provider):
         mins = np.asarray(mins)
         spot = self._spots[i][(mins - OPEN_MIN) // 5]
         vix = float(self._vix.iloc[i])
-        sig = vix / 100 * 0.8 * (1.2 if right == "P" else 0.8)
+        sig = vix / 100 * 0.8 * self.vol_scale * ((1.2 if right == "P" else 0.8) if self.skew else 1.0)
         T = (((expiry - d).days) * 1440.0 + (CLOSE_MIN - mins)) / (365.0 * 1440.0)
         mid = bs.price(spot[None, :], strikes[:, None], T[None, :], self.r, sig, right)
         u = _hash_u(d.toordinal(), expiry.toordinal(), 0 if right == "C" else 1, strikes, mins)
@@ -218,6 +270,30 @@ class SyntheticProvider(Provider):
             if len(self._leg_cache) > 120_000:
                 self._leg_cache.popitem(last=False)
         return hit[0].astype(float), hit[1].astype(float)
+
+    spot_gaps: set = set()      # test hook: days on which the "primary" spot source has no coverage
+
+    def spot_bars(self, d, res, source="alpaca", fallback="parity"):
+        from .spot import route_spot
+
+        def primary(day, rs):
+            if day in self.spot_gaps:
+                raise MissingData(f"synthetic spot gap {day}")
+            return self.get_underlying_bars(day, rs)
+        return route_spot(self, d, res, source, fallback, primary, self.r)
+
+    def chain_snapshot(self, d, expiry, minute, res, spot):
+        df = super().chain_snapshot(d, expiry, minute, res, spot)
+        if self.provider_greeks and len(df):
+            i = self._pos[d]
+            vix = float(self._vix.iloc[i])
+            T = ((expiry - d).days * 1440.0 + (CLOSE_MIN - minute)) / (365.0 * 1440.0)
+            dl = []
+            for r, k in zip(df.right, df.strike):
+                sig = vix / 100 * 0.8 * self.vol_scale * ((1.2 if r == "P" else 0.8) if self.skew else 1.0)
+                dl.append(bs.delta_s(spot, float(k), T, self.r, sig, r))
+            df = df.assign(delta=dl)
+        return df
 
     def synthetic_events(self):
         """SYNTHETIC calendar (not real dates!): FOMC every 6 weeks on Wednesday, CPI/PPI/NFP monthly."""

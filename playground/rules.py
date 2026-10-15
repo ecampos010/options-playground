@@ -109,12 +109,14 @@ def band(strikes: list[float], center: float, n: int) -> list[float]:
     return s[max(0, i - n): i + n + 1]
 
 
-def entry_strikes(strikes: list[float], target: float, right: str, cfg: Config) -> tuple[list[float], list[float]]:
+def entry_strikes(strikes: list[float], target: float, right: str, cfg: Config,
+                  width: float | None = None) -> tuple[list[float], list[float]]:
     """(band of candidate short strikes, all strikes needed incl. the long wing) for one side."""
+    w = cfg.width if width is None else width
     nb = cfg.band_strikes if cfg.strike_rule["mode"] == "vix" else max(cfg.band_strikes, 20)
     bnd = band(strikes, target, nb)
-    lo = min(bnd) - cfg.width if right == "P" else min(bnd)
-    hi = max(bnd) if right == "P" else max(bnd) + cfg.width
+    lo = min(bnd) - w if right == "P" else min(bnd)
+    hi = max(bnd) if right == "P" else max(bnd) + w
     return bnd, [k for k in strikes if lo <= k <= hi]
 
 

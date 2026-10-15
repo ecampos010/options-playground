@@ -1,3 +1,4 @@
 # E5: hold through earnings. N/A for SPY (no earnings): implemented, result == Green.
 tier: "yellow"
+level: 2
 earnings_filter: false

@@ -52,3 +52,45 @@ def implied_vol(px, S, K, T, r, right: str, lo=0.01, hi=3.0, iters=45):
     iv = 0.5 * (a + b)
     bad = (px <= price(S, K, T, r, lo, right) + 1e-9) | (px >= price(S, K, T, r, hi, right) - 1e-9)
     return np.where(bad, np.nan, iv)
+
+
+# ---------------------------------------------------------------- scalar versions (fast, pure python)
+def _cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def price_s(S: float, K: float, T: float, r: float, sigma: float, right: str) -> float:
+    T = max(T, 1e-8)
+    sigma = max(sigma, 1e-6)
+    sq = sigma * math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / sq
+    d2 = d1 - sq
+    disc = math.exp(-r * T)
+    return S * _cdf(d1) - K * disc * _cdf(d2) if right == "C" else K * disc * _cdf(-d2) - S * _cdf(-d1)
+
+
+def delta_s(S: float, K: float, T: float, r: float, sigma: float, right: str) -> float:
+    T = max(T, 1e-8)
+    sq = max(sigma, 1e-6) * math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * max(sigma, 1e-6) ** 2) * T) / sq
+    return _cdf(d1) if right == "C" else _cdf(d1) - 1.0
+
+
+def implied_vol_s(px: float, S: float, K: float, T: float, r: float, right: str, lo=0.01, hi=4.0):
+    """Bisection IV; None if the price is outside no-arbitrage bounds."""
+    if not (px == px) or px <= price_s(S, K, T, r, lo, right) + 1e-9 or px >= price_s(S, K, T, r, hi, right) - 1e-9:
+        return None
+    a, b = lo, hi
+    for _ in range(40):
+        m = 0.5 * (a + b)
+        if price_s(S, K, T, r, m, right) > px:
+            b = m
+        else:
+            a = m
+    return 0.5 * (a + b)
+
+
+def delta_from_mid(mid: float, S: float, K: float, T: float, r: float, right: str):
+    """Black-Scholes delta using the IV implied by `mid`; None if IV cannot be solved."""
+    iv = implied_vol_s(mid, S, K, T, r, right)
+    return None if iv is None else delta_s(S, K, T, r, iv, right)

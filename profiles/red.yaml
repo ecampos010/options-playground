@@ -2,6 +2,7 @@
 # Optional "ignore" switches (each separate; CLI: --red-ignore event,expiry-cap,time-exit,stop):
 #   event_buffer: false / expiry_cap: false / time_exit: 0 / stop_mult: null
 tier: "red"
+level: 3
 gate: false
 entry_requires_gate_trip: true
 max_open_lots: 1

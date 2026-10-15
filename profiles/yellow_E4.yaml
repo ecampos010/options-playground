@@ -1,3 +1,4 @@
 # E4: wider short deltas (~27 delta) instead of the VIX-distance (~16 delta) rule.
 tier: "yellow"
+level: 2
 strike_rule: {"mode": "delta", "put_delta": 0.27, "call_delta": 0.27}
