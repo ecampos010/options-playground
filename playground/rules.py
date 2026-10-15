@@ -124,6 +124,18 @@ def candidate_expiries(expiries: list[date], d: date, cfg: Config) -> list[date]
     return sorted(c, key=lambda e: (abs((e - d).days - tgt), e))[: cfg.entry_expiries]
 
 
+def is_monthly(e: date) -> bool:
+    return e.weekday() == 4 and 15 <= e.day <= 21
+
+
+def rank_expiries(expiries: list[date], d: date, cfg: Config) -> list[date]:
+    """All expiries in the DTE window, Fridays (monthlies on ties) first, then closest to target DTE.
+    Non-Fridays stay at the end as a fallback; the caller confirms each with a trial quote."""
+    lo, tgt, hi = cfg.dte
+    c = [e for e in expiries if lo <= (e - d).days <= hi]
+    return sorted(c, key=lambda e: (e.weekday() != 4, abs((e - d).days - tgt), not is_monthly(e), e))
+
+
 def delta_pick(strikes, mids, spot, T, r, right, target_abs_delta) -> float | None:
     """Strike whose implied |delta| (from mid prices) is closest to target."""
     import numpy as np

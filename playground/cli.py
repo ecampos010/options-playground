@@ -168,9 +168,10 @@ def _client(args):
 def cmd_probe(args):
     from .probe import Probe
     c = _client(args)
-    rep = Probe(c, out_dir=args.results_dir).run()
-    bad = [x for x in rep["checks"] if not x["ok"]]
-    print(f"probe: {len(rep['checks']) - len(bad)} passed, {len(bad)} failed -> {args.results_dir}/probe_report.md")
+    rep = Probe(c, out_dir=args.results_dir, data_dir=args.data_dir).run()
+    bad = [x for x in rep["checks"] if x["level"] == "FAIL"]
+    info = sum(x["level"] == "INFO" for x in rep["checks"])
+    print(f"probe: {len(rep['checks']) - len(bad) - info} passed, {len(bad)} failed, {info} info -> {args.results_dir}/probe_report.md")
     for x in bad:
         print(f"FAIL [{x['section']}] {x['name']}: {x['detail']} | {x['endpoint']} {x['params']} "
               f"status={x['status']} raw={x['raw_error'][:300]!r}")
@@ -186,7 +187,7 @@ def cmd_plan(args):
     daily, vix = prov.get_underlying_daily(), prov.get_vix_daily()
     evx = EventIndex(ev, list(daily.index)) if ev is not None else None
     print(make_plan(cfg, daily, vix, evx, threads=(2, 4), max_rps=args.max_rps, entry_fetch=args.entry_fetch,
-                    chunk_days=args.chunk_days, results_dir=args.results_dir, data_dir=args.data_dir,
+                    chunk_days=args.chunk_days, concurrency_limit=args.concurrency_limit, results_dir=args.results_dir, data_dir=args.data_dir,
                     attempt_frac=args.attempt_frac, trades_per_year=args.trades_per_year))
 
 
@@ -229,7 +230,9 @@ def cmd_download(args):
         return 2
     if args.daily_only:
         return 0
-    fetcher = Fetcher(client, cache, list(daily.index), threads=args.threads, chunk_days=args.chunk_days,
+    if args.threads > args.concurrency_limit:
+        log(f"--threads {args.threads} exceeds the {args.concurrency_limit}-concurrent-request limit; clamping")
+    fetcher = Fetcher(client, cache, list(daily.index), threads=min(args.threads, args.concurrency_limit), chunk_days=args.chunk_days,
                       entry_fetch=args.entry_fetch, log=log)
     prov = ThetaProvider(cache, fetcher)
     cfg = apply_overrides(cfg, {"start_date": cfg.start_date or str(start), "end_date": cfg.end_date or str(end)})
@@ -287,6 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-rps", type=float, default=5.0)
     p.add_argument("--entry-fetch", choices=["per-strike", "bulk"], default="per-strike")
     p.add_argument("--chunk-days", type=int, default=10)
+    p.add_argument("--concurrency-limit", type=int, default=4, help="Standard 4, Value 2")
     p.add_argument("--attempt-frac", type=float, default=0.35)
     p.add_argument("--trades-per-year", type=float, default=30)
     p.set_defaults(fn=cmd_plan)
@@ -294,6 +298,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sp.add_parser("download", help="resumable two-stage downloader into data/")
     add_rule_flags(p); add_data_flags(p)
     p.add_argument("--threads", type=int, default=2)
+    p.add_argument("--concurrency-limit", type=int, default=4, help="Standard 4, Value 2")
     p.add_argument("--max-rps", type=float, default=5.0)
     p.add_argument("--entry-fetch", choices=["per-strike", "bulk"], default="per-strike")
     p.add_argument("--chunk-days", type=int, default=10)

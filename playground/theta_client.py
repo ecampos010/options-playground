@@ -1,8 +1,14 @@
 """Thin ThetaData Theta Terminal (v3 REST) adapter.
 
-*** UNVERIFIED ***  Written from memory of the documented v3 API with no network access to the
-docs. ALL endpoint paths and parameter names live in `EP` / `P` below; every guess is marked
-TODO-VERIFY. Run `python -m playground probe` on the VPS and paste back any failure.
+Status (ThetaData STANDARD options account, Terminal v3, checked on a VPS):
+  VERIFIED   option expirations list, option strikes list, single-contract option history quote
+             (columns bid_size, bid_exchange, bid, bid_condition, ask_size, ask_exchange, ask,
+             ask_condition + a timestamp column; the parser tolerates several timestamp names).
+  VERIFIED   HTTP 472 "No data found" (empty body) = contract not listed/tradable that date -> NO_DATA,
+             not an error: never retried, cached as a negative result, counted separately.
+  NOT AVAILABLE on this account: stock and index history (HTTP 403; Stock/Index = FREE tier).
+  UNVERIFIED (TODO-VERIFY): bulk strike=*, option EOD, v2 fallbacks.
+ALL endpoint paths and parameter names live in `EP` / `P` below.
 
 Credentials: the Theta Terminal holds them (start it with THETA_USER/THETA_PASS from the
 environment or its own creds file). This client never sends or stores credentials.
@@ -24,14 +30,14 @@ DEFAULT_BASE = "http://127.0.0.1:25503"   # TODO-VERIFY: v3 terminal default por
 
 class EP:
     """Endpoint paths (single source of truth)."""
-    EXPIRATIONS = "/v3/option/list/expirations"       # TODO-VERIFY
-    STRIKES = "/v3/option/list/strikes"               # TODO-VERIFY
-    OPT_QUOTE = "/v3/option/history/quote"            # TODO-VERIFY
+    EXPIRATIONS = "/v3/option/list/expirations"       # VERIFIED (Standard)
+    STRIKES = "/v3/option/list/strikes"               # VERIFIED (Standard)
+    OPT_QUOTE = "/v3/option/history/quote"            # VERIFIED single contract (Standard); bulk form TODO-VERIFY
     OPT_EOD = "/v3/option/history/eod"                # TODO-VERIFY
-    STK_QUOTE = "/v3/stock/history/quote"             # TODO-VERIFY
-    STK_EOD = "/v3/stock/history/eod"                 # TODO-VERIFY
-    IDX_PRICE = "/v3/index/history/price"             # TODO-VERIFY
-    IDX_EOD = "/v3/index/history/eod"                 # TODO-VERIFY
+    STK_QUOTE = "/v3/stock/history/quote"             # 403 on Standard account (Stock: FREE)
+    STK_EOD = "/v3/stock/history/eod"                 # 403 on Standard account
+    IDX_PRICE = "/v3/index/history/price"             # 403 on Standard account (Index: FREE)
+    IDX_EOD = "/v3/index/history/eod"                 # 403 on Standard account
 
 
 class P:
@@ -55,7 +61,7 @@ class P:
         return f"{minute // 60:02d}:{minute % 60:02d}:00"
 
 
-NO_DATA_STATUS = {472, 404}   # TODO-VERIFY: Theta v3 "no data" status codes
+NO_DATA_STATUS = 472   # VERIFIED: "HTTP 472 No data found", empty body = not listed/tradable that date
 
 
 @dataclass
@@ -71,6 +77,8 @@ class ApiResult:
     empty: bool = False
     retries: int = 0
     throttled: int = 0
+    no_data: bool = False      # HTTP 472: contract not listed/tradable that date (NOT an error)
+    denied: bool = False       # HTTP 403: endpoint not included in the subscription
 
 
 class RateLimiter:
@@ -98,7 +106,8 @@ class ThetaClient:
         self.s = session
         self.limiter = RateLimiter(max_rps)
         self.timeout, self.max_retries, self._sleep = timeout, max_retries, sleep
-        self.stats = {"requests": 0, "bytes": 0, "throttled": 0, "errors": 0, "empty": 0, "latency_sum": 0.0}
+        self.stats = {"requests": 0, "bytes": 0, "throttled": 0, "errors": 0, "empty": 0, "no_data": 0,
+                      "denied": 0, "latency_sum": 0.0, "ok_requests": 0}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------ transport
@@ -117,16 +126,30 @@ class ThetaClient:
             except Exception as e:   # connection errors: back off and retry
                 lat, status, text = time.monotonic() - t0, -1, ""
                 err = f"{type(e).__name__}: {e}"
-            if status == 200 or status in NO_DATA_STATUS:
-                empty = status != 200 or not text.strip() or len(text.strip().splitlines()) <= 1
+            if status == NO_DATA_STATUS:       # not an error, not retried; caller caches the negative
                 with self._lock:
                     self.stats["requests"] += 1
+                    self.stats["no_data"] += 1
+                    self.stats["throttled"] += throttled
+                return ApiResult(True, status, text, lat, len(text), url, params, empty=True,
+                                 retries=attempt, throttled=throttled, no_data=True)
+            if status == 200:
+                empty = not text.strip() or len(text.strip().splitlines()) <= 1
+                with self._lock:
+                    self.stats["requests"] += 1
+                    self.stats["ok_requests"] += 1
                     self.stats["bytes"] += len(text)
                     self.stats["latency_sum"] += lat
                     self.stats["empty"] += int(empty)
                     self.stats["throttled"] += throttled
                 return ApiResult(True, status, text, lat, len(text), url, params, empty=empty,
                                  retries=attempt, throttled=throttled)
+            if status == 403:                  # endpoint not in subscription: do not retry
+                with self._lock:
+                    self.stats["denied"] += 1
+                return ApiResult(False, 403, text, lat, len(text), url, params, retries=attempt,
+                                 error=f"HTTP 403 (not permitted on this subscription): {text[:300]}",
+                                 denied=True)
             if status in (429, 503) or "too many" in text.lower() or status == -1 or status >= 500:
                 throttled += int(status == 429 or status == 503)
                 self._sleep(min(2.0 ** attempt, 60.0))
@@ -155,18 +178,25 @@ class ThetaClient:
 
     @staticmethod
     def norm_quotes(df: pd.DataFrame, strike: float | None = None, right: str | None = None) -> pd.DataFrame:
-        """-> ts,strike,right,bid,ask,bid_size,ask_size   (TODO-VERIFY column names)."""
+        """-> ts,strike,right,bid,ask,bid_size,ask_size. bid/ask/bid_size/ask_size VERIFIED; timestamp name tolerant."""
         cols = ["ts", "strike", "right", "bid", "ask", "bid_size", "ask_size"]
-        if df.empty:
-            return pd.DataFrame(columns=cols)
+        if df.empty:       # typed, so .dt / float ops work on NO_DATA (472) results
+            return pd.DataFrame({"ts": pd.Series([], dtype="datetime64[ns]"), "strike": pd.Series([], dtype=float),
+                                 "right": pd.Series([], dtype=object), "bid": pd.Series([], dtype=float),
+                                 "ask": pd.Series([], dtype=float), "bid_size": pd.Series([], dtype=float),
+                                 "ask_size": pd.Series([], dtype=float)})[cols]
         df = df.rename(columns={c: c.lower() for c in df.columns})
-        if "timestamp" in df:
-            ts = pd.to_datetime(df["timestamp"])
-        elif "datetime" in df:
-            ts = pd.to_datetime(df["datetime"])
-        else:   # v2-style fallback: date + ms_of_day
+        tcol = next((c for c in ("timestamp", "datetime", "quote_time", "time", "ts", "created", "last_trade")
+                     if c in df), None)
+        if tcol is not None:
+            ts = pd.to_datetime(df[tcol])
+        elif "date" in df and "ms_of_day" in df:   # v2-style fallback
             ts = pd.to_datetime(df["date"].astype(str)) + pd.to_timedelta(df["ms_of_day"], unit="ms")
-        out = pd.DataFrame({"ts": ts.dt.tz_localize(None) if getattr(ts.dt, "tz", None) else ts})
+        else:
+            raise KeyError(f"no timestamp column in quote response; columns={list(df.columns)}")
+        if getattr(ts.dt, "tz", None) is not None:
+            ts = ts.dt.tz_localize(None)
+        out = pd.DataFrame({"ts": ts})
         out["strike"] = df["strike"].astype(float) if "strike" in df else (strike if strike is not None else float("nan"))
         if "right" in df:
             out["right"] = df["right"].astype(str).str.upper().str[0]

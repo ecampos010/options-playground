@@ -50,6 +50,12 @@ class Provider:
     def list_strikes(self, d: date, expiry: date) -> list[float]:
         raise NotImplementedError
 
+    def entry_expiries(self, d: date, cfg, minute: int, spot: float, vix: float) -> list[date]:
+        """Expiries to try for an entry on day d (closest to the target DTE). Real-data providers
+        override this to confirm each one with a trial quote."""
+        from . import rules
+        return rules.candidate_expiries(self.list_expiries(d), d, cfg)
+
     def get_option_quotes(self, d: date, expiry: date, right: str, strikes, t0: int, t1: int,
                           res: str) -> pd.DataFrame:
         """Long frame: ts, strike, bid, ask, bid_size, ask_size. t0/t1 minutes from midnight."""

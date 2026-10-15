@@ -4,8 +4,9 @@ ThetaData-backed backtester for the **Green** SPY iron-condor rules, with a prob
 downloader, a plan (dry-run) command, a rule matrix and the traffic-light **ladder**
 (Green / Yellow E1-E7 / Red). Everything runs offline against a built-in **synthetic** provider.
 
-> **Status: the ThetaData adapter is UNVERIFIED.** It was written without network access to ThetaData's
-> docs. Run `probe` on the VPS first and paste back any FAIL lines. Synthetic results say nothing about
+> **Status: the ThetaData adapter is partly verified** (see "Verified vs unverified" at the bottom: lists and
+> single-contract 1m quotes work on a Standard account; bulk and intraday-underlying are open). Re-run `probe` on
+> the VPS after pulling and paste back any FAIL lines. Synthetic results say nothing about
 > real markets (the synthetic world is only there to exercise the code).
 
 License: placeholder - the owner will choose a license later. No third-party code is copied in.
@@ -42,7 +43,7 @@ Offline demo (no ThetaData needed): add `--provider synthetic` to `backtest`, `m
 |---|---|
 | `probe` | (a) expired SPY contracts listable ~1/3/5/8/10y ago, (b) bid/ask+sizes at 1m and finer, (c) size/latency of a ~40-strike day at 1m (+ bulk `strike=*` test), (d) request-rate burst / 429 behaviour, (e) SPX/VIX index history and VIX options. Fails soft: prints endpoint, params, status, raw error. |
 | `plan` | candidate days, expected trades, requests/rows/GB at 1m/5m/15m/eod, wall-clock at 2 and 4 threads (latency from the last probe), plus the naive full-chain cost. Writes nothing to `data/`. |
-| `download` | daily data, then Stage A (narrow entry snapshot: 3 expiries nearest the target DTE, +/-10 listed strikes around the rule strikes, at the entry bar) for every candidate day, then Stage B (the engine runs in fetch mode and pulls full-life quotes for only the 4 chosen legs, in `--chunk-days` pieces). Parquet in `data/options/res=<r>/date=<d>/expiry=<e>/right=<P|C>/`; coverage is recorded so re-runs fetch nothing. `--max-rps`, exponential backoff on 429/5xx, `--entry-fetch bulk` (one `strike=*` request per expiry; only if probe (c) shows it works), prints a manifest. `--cover-matrix` makes the cache cover all 8 matrix variants. |
+| `download` | daily data, then Stage A (narrow entry snapshot: up to 3 trial-confirmed expiries nearest the target DTE, Fridays first, +/-10 listed strikes around the rule strikes, at the entry bar) for every candidate day, then Stage B (the engine runs in fetch mode and pulls full-life quotes for only the 4 chosen legs, in `--chunk-days` pieces). Parquet in `data/options/res=<r>/date=<d>/expiry=<e>/right=<P|C>/`; coverage is recorded so re-runs fetch nothing. `--max-rps`, exponential backoff on 429/5xx, `--entry-fetch bulk` (one `strike=*` request per expiry; only if probe (c) shows it works), prints a manifest. `--cover-matrix` makes the cache cover all 8 matrix variants. |
 | `backtest` | one run; prints <=40 lines; writes `results/<run_id>/{trades.csv,equity.csv,config.json,summary.md}` |
 | `matrix` | standard 8-run grid (+ `--fill-compare`) |
 | `ladder` | green + yellow_E1..E7 + red on the same data/seed/fill; `--split-sample`, `--equal-budget` (give everyone Green's budget to isolate the guardrail effect) |
@@ -82,13 +83,34 @@ event calendar is used.
 
 ## Verified vs unverified
 
-Verified (offline, `pytest`): sizing (floor vs `--full-use`), gate/guards/event/circuit breaker, fill sign
-conventions, TP/stop/breach/time/expiry on scripted markets, interest accrual, 15%/60% caps, determinism,
-ladder profiles differ from Green by exactly one switch, cache coverage/idempotent re-runs, probe/plan plumbing,
-backoff - all against synthetic data or an offline simulator of the *assumed* API.
+**Verified on a real ThetaData STANDARD options account** (Terminal v3 at 127.0.0.1:25503, run on a VPS):
+* `option/list/expirations` (SPY: 2,148 expirations 2012-06-01..2029-01-19) and `option/list/strikes`: HTTP 200.
+* `option/history/quote` (single contract, 1m): columns `bid_size, bid_exchange, bid, bid_condition, ask_size,
+  ask_exchange, ask, ask_condition` + a timestamp column (parser accepts several names). Real bid/ask/sizes seen for
+  SPY on 2023-10-13 (exp 20231117, K414), 2021-10-15 (exp 20211119, K428) and 2016-10-14 (exp 20161118, K205).
+* **HTTP 472 "No data found" (empty body) = contract not listed/tradable that date -> NO_DATA**, not an error: never
+  retried, cached as a negative, counted separately (`no_data_472` in the manifest).
+  Seen: on 2025-10-15 only Friday expirations answered 5 weeks out (Mon-Thu were in the list but gave 472); on
+  2018-10-15 half-dollar strikes (e.g. 263.5) gave 472 while integer strikes returned rows.
+* Stock and index history are HTTP 403 (Stock/Index = FREE tier). Reported by `probe` as INFO, never a failure:
+  VIX comes from the Cboe CSV and SPY daily from yfinance.
 
-**Unverified until `probe` runs on the VPS:** every ThetaData endpoint path, parameter name and response column
-(`playground/theta_client.py`, marked `TODO-VERIFY`: v3 paths, port 25503, `format=csv`, `strike=*`/`right=both`,
-`start_time/end_time`, status 472 for "no data", interval strings, quote timestamp semantics, expired-contract
-listing, VIX/SPX index endpoints, Cboe CSV URL, rate limits and subscription tier). Also unverified: real-market
-behaviour of any strategy result.
+**Contract selection (implemented from those facts, tested only against an offline simulator of them):**
+expiries in the DTE window are ranked Friday/monthly-first and each is *confirmed with a trial 1-minute quote* at the
+entry minute (keep only those returning rows; result cached per date/expiry, so re-runs repeat nothing). Strikes come
+from the strikes list; one probe per date decides whether half-dollar strikes traded (`data/listing/trial/`), and the
+engine only ever picks among strikes that actually returned quotes, nearest to the rule target.
+
+**Still unverified:** the bulk entry form (`strike=*`, `right=both`, `start_time/end_time`; `probe` section c2 reports
+rows/bytes/latency/columns or the exact error), option EOD (`--resolution eod` quotes), finer-than-1m intervals,
+real request-rate limits (Standard: 4 concurrent; Value: 2 - `plan` shows both), Cboe CSV URL, and any real-market
+strategy result.
+
+**Known gap (decision needed):** intraday SPY bars cannot come from ThetaData on this plan (stock history 403). The
+engine needs a spot at each bar for entry strikes, the gate's day/5-day moves and breach exits, so 1m/5m/15m runs on
+real data need another spot source. `--resolution eod` is self-contained (spot = daily close). Stage A tolerates the
+missing bars (entry minutes come from the grid) but backtests will report data gaps until a source exists.
+
+Verified offline (`pytest`, 59 tests): sizing, gate/guards/event/circuit breaker, fills, exits, interest, caps,
+determinism, ladder single-switch profiles, cache coverage/idempotent re-runs, 472/403 handling, Friday-first
+fallback and half-dollar handling, probe/plan plumbing.

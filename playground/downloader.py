@@ -200,18 +200,22 @@ def stage_a(provider, fetcher: Fetcher, cfg: Config, evx, log, threads: int = 2,
     def work(d):
         try:
             i = pos[d]
-            bars = sprov.get_underlying_bars(d, cfg.resolution)
-            mins = [t.hour * 60 + t.minute for t in bars.index]
+            try:
+                bars = sprov.get_underlying_bars(d, cfg.resolution)
+                mins = [t.hour * 60 + t.minute for t in bars.index]
+            except MissingData:      # e.g. stock history 403 on this plan: entry minutes come from the grid
+                mins = bar_minutes(cfg.resolution)
             spot, v = float(daily["open"].iloc[i]), float(vx.iloc[i - 1])
             tp_, tc_ = rules.target_strikes(spot, v, cfg)
-            for e in rules.candidate_expiries(sprov.list_expiries(d), d, cfg):
-                ks = sprov.list_strikes(d, e)
-                for right, tgt in (("P", tp_), ("C", tc_)):
-                    _, need = rules.entry_strikes(ks, tgt, right, cfg)
-                    for m in entry_minutes(d, cfg):
-                        bm = next((x for x in mins if x >= m), None)
-                        if bm is not None:
-                            sprov.get_option_quotes(d, e, right, need, bm, bm, cfg.resolution)
+            for m in entry_minutes(d, cfg):
+                bm = next((x for x in mins if x >= m), None)
+                if bm is None:
+                    continue
+                for e in sprov.entry_expiries(d, cfg, bm, spot, v):
+                    ks = sprov.list_strikes(d, e)
+                    for right, tgt in (("P", tp_), ("C", tc_)):
+                        _, need = rules.entry_strikes(ks, tgt, right, cfg)
+                        sprov.get_option_quotes(d, e, right, need, bm, bm, cfg.resolution)
             return d, None
         except MissingData as ex:
             return d, str(ex)
@@ -229,7 +233,8 @@ def stage_a(provider, fetcher: Fetcher, cfg: Config, evx, log, threads: int = 2,
 def write_manifest(cache: DataCache, fetcher: Fetcher, extra: dict) -> dict:
     st = fetcher.client.stats
     m = {"requests": st["requests"], "response_bytes": st["bytes"], "throttled": st["throttled"],
-         "errors": st["errors"], "empty_responses": st["empty"], "rows_written": fetcher.rows,
+         "errors": st["errors"], "empty_responses": st["empty"], "no_data_472": st["no_data"],
+         "denied_403": st["denied"], "rows_written": fetcher.rows,
          "cache_bytes_on_disk": cache.disk_bytes(), "failed": fetcher.failed[:200],
          "avg_latency_s": (st["latency_sum"] / st["requests"]) if st["requests"] else None, **extra}
     p = cache.root / "state" / "manifest.json"
