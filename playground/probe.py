@@ -66,12 +66,19 @@ class Probe:
             return self.spot_fn(d)
         from .cache import DataCache
         from .spot import SpotStore
-        for df in (SpotStore(Path(self.data_dir) / "spot").load_daily(ticker, "raw"),
-                   DataCache(self.data_dir).load_daily(ticker)):
+        store = SpotStore(Path(self.data_dir) / "spot")
+        for df in (store.load_daily(ticker, "raw"), DataCache(self.data_dir).load_daily(ticker)):
             if df is not None and len(df):
                 ix = df.index[df.index <= d]
                 if len(ix) and (d - ix[-1]).days <= 5:
                     return float(df.loc[ix[-1], "close"])
+        # Alpaca minute bars (data/spot/<T>/min1): last regular-session bar close on the nearest earlier cached day
+        for back in range(0, 6):
+            day = d - timedelta(days=back)
+            if store.has_day(ticker, day):
+                bars = store.read_day(ticker, day)
+                if len(bars):
+                    return float(bars.sort_values("m")["c"].iloc[-1])
         from .dailydata import spy_from_yfinance
         y = spy_from_yfinance(d - timedelta(days=3), d, ticker)
         if y is not None and len(y):
@@ -97,7 +104,8 @@ class Probe:
         spot = self.spot_for(target, tk)
         if spot is None:
             self.rec(sec, f"{y}y ago ({target})", False,
-                     "no spot source (stock history is 403 on Standard): run `download --daily-only` or pip install yfinance")
+                     "no spot source (stock history is 403 on Standard; Theta is not used for spot): run `spot` (Alpaca "
+                     "daily/minute bars), `download --daily-only`, or pip install yfinance")
             return
         ranked = rules.rank_expiries(exps, target, cfg)
         if not ranked:

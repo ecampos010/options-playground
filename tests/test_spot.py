@@ -197,6 +197,12 @@ def test_massive_validation_stats_and_bad_day_marking(tmp_path, monkeypatch):
     class Args:
         validate, sample_days, mark_bad, data_dir = "massive", 2, True, str(tmp_path)
     monkeypatch.setattr(sp, "MassiveClient", lambda: FakeMassive(0.40, st))
+    # dates before 2024-10-16 are outside Massive's free-tier reach: skipped with a note, never queried
+    rows0, notes0 = sp.run_validations(Args, st, ["SPY"], days[0], days[-1], None)
+    assert rows0 == [] and any("Massive cross-check skipped" in n for n in notes0) and st.bad_days("SPY") == set()
+    days = [D(2025, 11, 24), D(2025, 11, 25)]
+    for d in days:
+        st.write_day("SPY", d, day_bars(390, d))
     rows, notes = sp.run_validations(Args, st, ["SPY"], days[0], days[-1], None)
     assert rows and "Alpaca vs Massive" in rows[0] and st.bad_days("SPY") == {str(d) for d in days}
     sp.write_validation_md(rows, tmp_path / "v.md", notes)

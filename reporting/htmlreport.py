@@ -171,7 +171,7 @@ def _page(ctx, data, syn) -> str:
                      "not from market data. It only proves the machinery works.</div>")
     parts.append(f'<p class="muted small">Generated {e(meta["generated"])} from {e(meta["runs_desc"])}. Research software, not advice. '
                  f'Start equity $100,000; idle cash earns {meta["apy"] * 100:.1f}% APY; sizing = allocation x current equity split equally across tickers; '
-                 f'per-expiry cap {e(meta["expiry_cap"])}; circuit breaker {e(meta["cb"])}. Monte Carlo: {e(meta["mc_desc"])}.</p>')
+                 f'per-expiry cap {e(meta["expiry_cap"])}; circuit breaker {e(meta["cb"])}. Monte Carlo: {e(meta["mc_desc"])}. Delta source: {e(meta.get("delta_source", "unknown"))}.</p>')
     parts.append('<nav class="toc"><a href="#explorer">Equity &amp; thermometer</a><a href="#ranking">Ranking</a><a href="#vix">VIX regimes</a>'
                  '<a href="#ways">Ways to lose money</a><a href="#stress">Stress lab</a><a href="#mgmt">Management rules</a><a href="#method">Caveats</a>'
                  '<button id="btn-theme" type="button" aria-label="Toggle light/dark">Light / dark</button></nav>')
@@ -186,7 +186,7 @@ def _page(ctx, data, syn) -> str:
                  '<div class="card"><h3 id="dd-title"></h3><div class="chart" id="dd-chart"></div></div>'
                  '<div class="card"><h3>Thermometer</h3><div id="thermo"></div></div>')
     # ranking
-    parts.append('<h2 id="ranking">Ranking</h2><p class="small">Ranked by return / max drawdown (CAGR divided by max drawdown) among scenarios that did '
+    parts.append('<h2 id="ranking">Ranking</h2><p class="small">Ranked within thermometer zone first (Safe, Mild, Danger, Breaking point), then by return / max drawdown (CAGR divided by max drawdown), among scenarios that did '
                  '<b>not</b> go broke; final equity is shown beside it and is never the ranking key. Scenarios with fewer than 30 trades are listed after the '
                  'rest and flagged TOO FEW TRADES - not evidence. Broke scenarios are a separate list, ranked by how late they went broke. '
                  'Level tags and zone names carry the meaning; colour is decoration only. Click a row to load it above.</p>'

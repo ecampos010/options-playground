@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from . import ALLOCATIONS, LEVEL_TAGS, START_EQUITY
+from . import ALLOCATIONS, LEVEL_TAGS, START_EQUITY, effective_level
 from . import montecarlo as mcm
 from . import thermo, verdicts
 from .replay import ReplayConfig, build_variant, max_drawdown, monthly_stats, replay
@@ -93,7 +93,8 @@ def _one_group(args):
                 m["ruin_odds"] = ruin
                 m["zone"] = thermo.zone(m["max_dd"], ruin, m["broke"], tcfg)
                 sid = scenario_id(profile, tag, sname, T, A)
-                m.update(scenario_id=sid, level=level, level_tag=LEVEL_TAGS.get(level, str(level)), profile=profile,
+                lvl = effective_level(level, A)
+                m.update(scenario_id=sid, level=lvl, log_level=level, level_tag=LEVEL_TAGS.get(lvl, str(lvl)), profile=profile,
                          config_tag=tag, strategy=sname, tickers="+".join(T), n_tickers=len(T), allocation=A,
                          typical_vix=(vixmode.iloc[0] if len(vixmode) else ""), short_delta=float(delta) if pd.notna(delta) else np.nan,
                          group=f"{profile}|{tag}|{sname}")
@@ -127,10 +128,13 @@ def run_grid(trades: pd.DataFrame, marks: pd.DataFrame, gcfg: GridConfig | None 
 
 # ------------------------------------------------------------------ ranking + verdict text
 def rank(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Main list: NOT-broke scenarios by return/maxDD (evidence-grade rows first); broke rows listed separately,
-    ranked by how late they went broke."""
+    """Main list: NOT-broke scenarios ranked within thermometer zone first (Safe, Mild, Danger, Breaking point), then
+    evidence-grade rows, then return/maxDD - so a worse-zone row never outranks a Safe row. Broke rows are listed
+    separately, ranked by how late they went broke."""
     ok = df[~df["broke"]].copy()
-    ok = ok.sort_values(["too_few_trades", "calmar", "max_dd"], ascending=[True, False, True], kind="stable")
+    ok["_zr"] = ok["zone"].map(thermo.zone_rank) if "zone" in ok else 0
+    ok = ok.sort_values(["_zr", "too_few_trades", "calmar", "max_dd"], ascending=[True, True, False, True],
+                        kind="stable").drop(columns="_zr")
     ok.insert(0, "rank", np.arange(1, len(ok) + 1))
     br = df[df["broke"]].copy()
     br = br.sort_values(["broke_date", "final_equity"], ascending=[False, False], kind="stable")

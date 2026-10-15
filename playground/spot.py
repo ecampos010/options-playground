@@ -21,6 +21,8 @@ import pandas as pd
 from .calendar import nyse_holidays, trading_days
 from .provider import CLOSE_MIN, OPEN_MIN, MissingData, Provider, bar_minutes
 
+MASSIVE_FLOOR = date(2024, 10, 16)   # free-tier reach is ~2 years; older dates return NOT_ENTITLED (0 minutes compared)
+DAILY_CLOSE_TOL = 0.03               # flag Alpaca last-bar vs yfinance daily close differences above this ($)
 MIN_BARS = 330                    # regular session has 390 one-minute bars; flag days below this
 HALF_DAY_MIN_BARS = 180           # half days (13:00 close) have ~210 bars
 
@@ -414,7 +416,8 @@ def validate_parity(store, provider, ticker, days, rate, res="5m") -> tuple[dict
 
 
 def validate_greeks_field(store, client, ticker, samples) -> tuple[dict, bool]:
-    """samples: [(day, expiry, strike, minute)]. Compares Alpaca spot with the Greeks response's underlying_price."""
+    """samples: [(day, expiry, strike, minute)]. Second spot check: Alpaca minute open vs the `underlying_price` of the
+    ThetaData first_order Greeks response (junk rows are already dropped by the client)."""
     a_list, b_list, exists = [], [], False
     for d, e, k, m in samples:
         df, r = client.greeks_bulk(e, d, "1m", m, m + 1, ticker, strike=k, right="C")
@@ -425,6 +428,52 @@ def validate_greeks_field(store, client, ticker, samples) -> tuple[dict, bool]:
                 a_list.append(float(a[m]))
                 b_list.append(float(df["underlying_price"].dropna().iloc[0]))
     return agreement_stats(pd.Series(a_list), pd.Series(b_list)), exists
+
+
+def side_by_side_note(ticker: str, parity: dict | None, theta: dict | None) -> str:
+    """One line putting the two independent spot cross-checks (Alpaca vs parity, Alpaca vs Theta underlying_price) together."""
+    f = lambda st: "n/a" if not st or not st.get("n") else f"median ${st['median_abs']:.4f} / p95 ${st['p95_abs']:.4f} (n={st['n']})"  # noqa: E731
+    return f"{ticker}: Alpaca vs parity {f(parity)}  |  Alpaca vs Theta underlying_price {f(theta)}"
+
+
+def massive_days(days: list[date], floor: date = MASSIVE_FLOOR) -> list[date]:
+    """Massive free tier only reaches back ~2 years; querying older dates just returns NOT_ENTITLED."""
+    return [d for d in days if d >= floor]
+
+
+def daily_close_check(store: SpotStore, ticker: str, days: list[date], yf_close: pd.Series,
+                      tol: float = DAILY_CLOSE_TOL) -> dict:
+    """Alpaca LAST regular-session minute bar close vs the yfinance (raw, unadjusted) daily close, every given day.
+    yf_close: Series indexed by date. Returns {n, flagged:[(date, alpaca, yf, diff)], max_abs, missing_yf, missing_alpaca}."""
+    flagged, n, mx, miss_y, miss_a = [], 0, 0.0, 0, 0
+    for d in days:
+        if not store.has_day(ticker, d):
+            miss_a += 1
+            continue
+        bars = store.read_day(ticker, d)
+        if not len(bars):
+            miss_a += 1
+            continue
+        if d not in yf_close.index or pd.isna(yf_close.loc[d]):
+            miss_y += 1
+            continue
+        a, y = float(bars.sort_values("m")["c"].iloc[-1]), float(yf_close.loc[d])
+        n += 1
+        diff = a - y
+        mx = max(mx, abs(diff))
+        if abs(diff) > tol:
+            flagged.append((str(d), round(a, 4), round(y, 4), round(diff, 4)))
+    return {"n": n, "flagged": flagged, "max_abs": mx, "missing_yf": miss_y, "missing_alpaca": miss_a, "tol": tol}
+
+
+def yfinance_closes(ticker: str, start: date, end: date) -> pd.Series | None:
+    from .dailydata import spy_from_yfinance
+    df = spy_from_yfinance(start, end, ticker)
+    return None if df is None or df.empty else df["close"].astype(float)
+
+
+class _Skip(Exception):
+    pass
 
 
 def run_validations(args, store, tickers, start, end, alpaca_client):
@@ -438,17 +487,41 @@ def run_validations(args, store, tickers, start, end, alpaca_client):
             continue
         if "massive" in want:
             try:
-                st, per, got = validate_massive(store, MassiveClient(), t, days)
-                rows.append(stats_row(f"{t}: Alpaca vs Massive", st,
-                                      f"Massive returned {len(got)}/{len(days)} sampled days ({', '.join(got[:2])}..)" if got
-                                      else "Massive returned nothing (free tier ~2y reach; key/plan?)"))
+                mdays = massive_days(sample_days(store, t, max(start, MASSIVE_FLOOR), end, args.sample_days))
+                if not mdays:
+                    notes.append(f"{t}: Massive cross-check skipped - no covered Alpaca days on/after {MASSIVE_FLOOR} "
+                                 "(free-tier reach ~2y; older dates return NOT_ENTITLED)")
+                    raise _Skip()
+                st, per, got = validate_massive(store, MassiveClient(), t, mdays)
+                rows.append(stats_row(f"{t}: Alpaca vs Massive (>= {MASSIVE_FLOOR})", st,
+                                      f"Massive returned {len(got)}/{len(mdays)} sampled days ({', '.join(got[:2])}..)" if got
+                                      else "Massive returned nothing (key/plan?)"))
                 if got:
                     notes.append(f"{t}: Massive range actually returned: {min(got)}..{max(got)}")
                 for d, v in per.items():
                     if v is not None and v > 0.25:
                         bad.setdefault(t, set()).add(d)
+            except _Skip:
+                pass
             except Exception as e:
                 notes.append(f"{t}: Massive validation failed: {type(e).__name__}: {str(e)[:120]}")
+        if "dailyclose" in want:
+            try:
+                alld = [d for d in trading_days(start, end) if store.has_day(t, d)]
+                yc = yfinance_closes(t, start, end) if alld else None
+                if yc is None:
+                    notes.append(f"{t}: daily-close check skipped - yfinance unavailable or no Alpaca days (pip install yfinance)")
+                else:
+                    dc = daily_close_check(store, t, alld, yc)
+                    rows.append(f"| {t}: Alpaca last 1m bar vs yfinance daily close | {dc['n']} days | max ${dc['max_abs']:.4f} | "
+                                f"- | - | - | {len(dc['flagged'])} day(s) differ by > ${dc['tol']:.2f}; "
+                                f"no yfinance close on {dc['missing_yf']} day(s) |")
+                    for d_, a_, y_, df_ in dc["flagged"][:25]:
+                        notes.append(f"{t}: daily close {d_}: Alpaca {a_} vs yfinance {y_} (diff {df_:+.4f})")
+                    if len(dc["flagged"]) > 25:
+                        notes.append(f"{t}: ... {len(dc['flagged']) - 25} more daily-close differences")
+            except Exception as e:
+                notes.append(f"{t}: daily-close validation failed: {type(e).__name__}: {str(e)[:120]}")
         if want & {"greeks", "parity"}:
             try:
                 from .downloader import Fetcher
@@ -460,8 +533,10 @@ def run_validations(args, store, tickers, start, end, alpaca_client):
                 daily = prov0.get_underlying_daily()
                 fetcher = Fetcher(client, cache, list(daily.index), 2, symbol=t)
                 prov = factory.theta(t, args.data_dir, fetcher, 0.036)
+                st_par = st_gk = None
                 if "parity" in want:
                     st, per = validate_parity(store, prov, t, days[: max(2, args.sample_days // 2)], 0.036)
+                    st_par = st
                     rows.append(stats_row(f"{t}: Alpaca vs put-call-parity spot", st,
                                           "div ignored, ATM strike, 5-20 DTE; includes bid/ask noise"))
                     for d, v in per.items():
@@ -479,8 +554,11 @@ def run_validations(args, store, tickers, start, end, alpaca_client):
                         k = min([x for x in ks if x == int(x)] or ks, key=lambda x: abs(x - c))
                         samples += [(d, e, k, m) for m in (10 * 60, 12 * 60, 14 * 60)]
                     st, exists = validate_greeks_field(store, client, t, samples)
+                    st_gk = st
                     rows.append(stats_row(f"{t}: Alpaca vs ThetaData Greeks underlying_price", st,
                                           "field present" if exists else "underlying_price field NOT present / endpoint unavailable"))
+                if st_par is not None or st_gk is not None:
+                    notes.append(side_by_side_note(t, st_par, st_gk))
             except Exception as e:
                 notes.append(f"{t}: Theta-based validations failed: {type(e).__name__}: {str(e)[:120]}")
     if getattr(args, "mark_bad", True):

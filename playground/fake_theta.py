@@ -19,7 +19,7 @@ class FakeResp:
 
 
 def _d(s: str) -> date:
-    return datetime.strptime(s, "%Y%m%d").date()
+    return datetime.strptime(s, "%Y-%m-%d" if "-" in s else "%Y%m%d").date()
 
 
 def _min(s: str) -> int:
@@ -120,7 +120,7 @@ class FakeSession:
         d = _d(p[P.date])
         i = pv._pos[d]
         spot_arr = pv._spots[i]
-        rows = ["timestamp,symbol,expiration,strike,right,delta,implied_vol,underlying_price"]
+        rows = ["timestamp,symbol,expiration,strike,right,bid,ask,delta,implied_vol,iv_error,underlying_timestamp,underlying_price"]
         ks = pv.list_strikes(d, e)
         for r in ("C", "P"):
             q = pv.get_option_quotes(d, e, r, ks, t0, t1 - 1 if t1 > t0 else t0, res)
@@ -130,7 +130,8 @@ class FakeSession:
                 sig = float(pv._vix.iloc[i]) / 100 * 0.8 * pv.vol_scale * ((1.2 if r == "P" else 0.8) if pv.skew else 1.0)
                 T = ((e - d).days * 1440.0 + (CLOSE_MIN - m)) / (365.0 * 1440.0)
                 rows.append(f"{pd.Timestamp(x.ts).isoformat()},SPY,{e},{x.strike:.3f},{'CALL' if r == 'C' else 'PUT'},"
-                            f"{bs.delta_s(S, x.strike, T, pv.r, sig, r):.5f},{sig:.4f},{S:.4f}")
+                            f"{x.bid},{x.ask},{bs.delta_s(S, x.strike, T, pv.r, sig, r):.5f},{sig:.4f},0.0001,"
+                            f"{pd.Timestamp(x.ts).isoformat()},{S:.4f}")
         if len(rows) == 1:
             raise KeyError("no data")
         return "\n".join(rows)

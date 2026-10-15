@@ -42,7 +42,7 @@ losing calendar month) `--expiry-cap 0.6` (0 = off) `--paths 10000` `--block 1|2
   average contracts, entries skipped, longest losing streak, broke flag/date, years, trades. Under 30 trades: **TOO FEW TRADES - not evidence**.
 
 ## Ranking
-Scenarios that did not go broke are sorted by return/maxDD (never by final equity); rows with < 30 trades come after the evidence-grade rows.
+Scenarios that did not go broke are ranked within thermometer zone first (Safe, Mild, Danger, Breaking point), then by return/maxDD (never by final equity); within a zone, rows with < 30 trades come after the evidence-grade rows. Level tags: Green / Lvl 1 only at allocation <= 15% from Green-rule logs; larger allocations are tagged Experiment / Lvl 4.
 Broke scenarios are a separate list, latest broke first. Each row has a plain-English verdict from `config/verdicts.yaml`
 and a level tag ("Green / Lvl 1", "Yellow / Lvl 2", "Red / Lvl 3", "Experiment / Lvl 4"). Text carries the meaning; colour is decoration.
 

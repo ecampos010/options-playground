@@ -24,7 +24,7 @@ from .config import Config
 from .engine import Leg, entry_minutes
 from .events import EventIndex
 from .provider import CLOSE_MIN, MissingData, Provider
-from .strategies import STRATEGIES, Chain, collateral_per_contract, payoff_ps
+from .strategies import STRATEGIES, Chain, check_max_loss, collateral_per_contract, payoff_ps
 from .tickers import TickerInfo, spread_width
 
 FAR = 10**9
@@ -706,6 +706,7 @@ class _Lab:
             opt = [l for l in legs if l.right != "S"]
             credit = open_credit(opt, quotes, cfg.fill, cfg.haircut)
             coll = collateral_per_contract(legs, credit, spot)
+            check_max_loss(cfg.strategy, legs, credit, spot)
             if self.strat.credit and credit < cfg.min_credit_pct * width - 1e-9:
                 reason = "mincredit"
                 continue
@@ -826,7 +827,7 @@ class _Lab:
                          "playground": __import__("playground").__version__},
             "spot_coverage": {"days_by_source": self.spot_days, "days_without_spot": len(self.missing_spot_days),
                               "first_missing": self.missing_spot_days[:10]},
-            "delta_source": self.delta_src, "unit_mode": self.unit, "notes": self.notes,
+            "delta_source": self.delta_src, "delta_source_tag": delta_source_tag(self.delta_src), "unit_mode": self.unit, "notes": self.notes,
             "events": self.events_note, "fill_model": cfg.fill, "fee_per_contract": cfg.fee_per_contract,
             "config_tag": config_tag(cfg), "level": cfg.level, "window": self.window,
             "adjustments": self.adjust_log}
@@ -834,6 +835,15 @@ class _Lab:
         sz = pd.DataFrame(self.sizing, columns=["trade_id", "contracts", "equity_at_entry"]) if not self.unit else None
         meta["data_range"] = [str(d0), str(d1)]
         return LabResult(cfg, self.rid, t, m, bl, meta, eq, sz, config_tag(cfg))
+
+
+def delta_source_tag(counts: dict) -> str:
+    """'theta_greeks' (every entry delta came from the ThetaData first_order Greeks), 'bs_fallback' (all Black-Scholes
+    from mid IV) or 'mixed' (some legs fell back because their Greeks rows were junk/missing)."""
+    prov, bs_ = counts.get("provider", 0), counts.get("bs_mid_iv", 0)
+    if prov and not bs_:
+        return "theta_greeks"
+    return "mixed" if prov else "bs_fallback"
 
 
 def run_lab(provider: Provider, cfg: Config, events=None, events_note: str = "", tinfo: TickerInfo | None = None,

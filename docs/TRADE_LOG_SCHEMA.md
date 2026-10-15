@@ -63,7 +63,7 @@ near the DTE target was listed.
 * `config.json`: `flags` (every setting), `git_commit`, `data_range` (first/last trading day backtested),
   `window` (stress window dates or null), `command`.
 * `meta.json`: `counts` (trades, exit reasons, blocked by reason), `versions` (python, pandas, numpy, playground),
-  `spot_coverage` (days with full coverage / flagged / fell back), `delta_source` (provider vs BS-from-mid
+  `spot_coverage` (days with full coverage / flagged / fell back), `delta_source_tag` (`theta_greeks` | `bs_fallback` | `mixed`), `delta_source` (provider vs BS-from-mid
   counts), `unit_mode` (bool), `notes`.
 
 ## Unit mode vs equity mode

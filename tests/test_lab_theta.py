@@ -7,6 +7,7 @@ from playground.config import build_config
 from playground.downloader import BudgetExceeded, Fetcher, stage_a, write_manifest
 from playground.events import EventIndex
 from playground.fake_theta import FakeSession
+from playground.theta_client import EP
 from playground.lab import run_lab
 from playground.provider import SyntheticProvider
 from playground.theta_client import ThetaClient
@@ -63,7 +64,7 @@ def test_greeks_unsupported_falls_back_to_bs_and_is_logged(world, tmp_path):
     r = run_lab(prov, c, None, "t")
     assert len(r.trades) >= 2 and r.meta["delta_source"]["provider"] == 0 and r.meta["delta_source"]["bs_mid_iv"] > 0
     assert f.greeks_supported is False and cl.stats["denied"] >= 1
-    assert sum(1 for path, _ in sess.calls if path == "/v3/option/history/greeks/all") == 1     # asked once, then stopped
+    assert sum(1 for path, _ in sess.calls if path == EP.OPT_GREEKS) == 1     # asked once, then stopped
 
 
 def test_vix_distance_mode_confirms_cycle_expiry_with_trial(world, tmp_path):

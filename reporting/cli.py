@@ -13,8 +13,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m reporting", description="Reporting, portfolio replay and stress lab (research software, not advice).")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    v = sub.add_parser("validate", help="validate runs/*/ against the trade-log schema")
-    v.add_argument("runs")
+    v = sub.add_parser("validate", help="validate a run folder, or a folder of runs, against the trade-log schema")
+    v.add_argument("runs", help="a single run folder (contains trades.csv) or a parent folder of run folders")
 
     g = sub.add_parser("make-synthetic-logs", help="write SYNTHETIC fixture logs")
     g.add_argument("--out", default="runs_synth")

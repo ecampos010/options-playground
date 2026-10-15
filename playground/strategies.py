@@ -44,6 +44,35 @@ def collateral_per_contract(legs: list[Leg], credit_ps: float, S0: float) -> flo
     return round(max_loss_ps(legs, credit_ps, S0) * 100.0, 4)
 
 
+def expected_max_loss_ps(strategy: str, legs: list[Leg], credit_ps: float, S0: float = 0.0) -> float:
+    """Closed-form max loss per share from the ACTUAL strikes of the legs (never a nominal/fixed width).
+    Independent of the payoff scan in max_loss_ps, so the two cross-check each other."""
+    def k(right, qty):
+        return sorted((l.strike for l in legs if l.right == right and l.qty == qty))
+    if strategy in ("iron_condor", "iron_butterfly"):
+        sp, lp, sc, lc = k("P", -1)[0], k("P", 1)[0], k("C", -1)[0], k("C", 1)[0]
+        return max(0.0, max(sp - lp, lc - sc) - credit_ps)
+    if strategy == "bull_put_spread":
+        return max(0.0, k("P", -1)[0] - k("P", 1)[0] - credit_ps)
+    if strategy == "put_bwb":
+        k1, k3 = k("P", 1)[1], k("P", 1)[0]               # near (higher) wing, far (lower) wing
+        body = next(l.strike for l in legs if l.qty == -2)
+        near, far = k1 - body, body - k3
+        return max(0.0, max(far - near, 0.0) - credit_ps)   # wider wing - narrower wing - credit
+    if strategy == "cash_secured_put":
+        return max(0.0, k("P", -1)[0] - credit_ps)
+    if strategy == "covered_call":
+        return max(0.0, S0 - credit_ps)
+    raise ValueError(f"no closed-form max loss for strategy {strategy!r}")
+
+
+def check_max_loss(strategy: str, legs: list[Leg], credit_ps: float, S0: float = 0.0) -> float:
+    """Assert the payoff-scan max loss equals the strike-width closed form; returns it (per share)."""
+    got, want = max_loss_ps(legs, credit_ps, S0), expected_max_loss_ps(strategy, legs, credit_ps, S0)
+    assert abs(got - want) < 1e-6, f"{strategy}: max loss {got:.6f} != strike-width formula {want:.6f} for legs {legs}"
+    return got
+
+
 # ---------------------------------------------------------------- chain view
 class Chain:
     """Quotes + deltas at the entry bar for strike selection."""
