@@ -22,26 +22,56 @@ class ThetaProvider(Provider):
     name = "theta-cache"
     uses_real_data = True
 
-    def __init__(self, cache: DataCache, fetcher=None, symbol="SPY"):
+    def __init__(self, cache: DataCache, fetcher=None, symbol="SPY", vix_cache: DataCache | None = None,
+                 spot_store=None, rate: float = 0.036, use_greeks: bool = True):
         self.cache, self.fetcher, self.symbol = cache, fetcher, symbol
+        self.ticker = symbol
+        self.vix_cache = vix_cache or cache
+        self.spot_store, self.rate, self.use_greeks = spot_store, rate, use_greeks
         self._daily = self._vix = None
         self._ctx: dict[date, tuple[int, float, str]] = {}   # day -> (entry minute, target put strike, res)
 
-    def _need(self, name):
-        df = self.cache.load_daily(name)
+    def clone(self, fetcher=None) -> "ThetaProvider":
+        c = ThetaProvider(self.cache, fetcher, self.symbol, self.vix_cache, self.spot_store, self.rate, self.use_greeks)
+        c._daily, c._vix = self._daily, self._vix
+        return c
+
+    def _need(self, name, cache=None):
+        df = (cache or self.cache).load_daily(name)
         if df is None:
-            raise MissingData(f"{name} daily history missing in {self.cache.root}; run `download --daily-only`")
+            raise MissingData(f"{name} daily history missing in {(cache or self.cache).root}; run `download --daily-only`")
         return df
 
     def get_underlying_daily(self):
         if self._daily is None:
-            self._daily = self._need(self.symbol)
+            df = self.cache.load_daily(self.symbol)
+            if df is None and self.spot_store is not None:
+                df = self.spot_store.load_daily(self.symbol, "raw")
+            if df is None:
+                raise MissingData(f"{self.symbol} daily history missing (run `download --daily-only` or `spot`)")
+            self._daily = df
         return self._daily
 
     def get_vix_daily(self):
         if self._vix is None:
-            self._vix = self._need("VIX")["close"]
+            self._vix = self._need("VIX", self.vix_cache)["close"]
         return self._vix
+
+    def get_vix3m_daily(self):
+        df = self.vix_cache.load_daily("VIX3M")
+        return None if df is None else df["close"]
+
+    def get_exdiv_dates(self):
+        from .exdiv import load_exdiv
+        return load_exdiv(self.spot_store.root if self.spot_store is not None else None, self.symbol)
+
+    def spot_bars(self, d, res, source="alpaca", fallback="parity"):
+        from .spot import AlpacaSpot, route_spot
+        if self.spot_store is None:
+            primary = lambda day, rs: (_ for _ in ()).throw(MissingData("no spot store configured (run `spot`)"))
+        else:
+            primary = AlpacaSpot(self.symbol, self.spot_store, self.rate).bars_alpaca
+        return route_spot(self, d, res, source, fallback, primary, self.rate)
 
     def get_underlying_bars(self, d, res):
         if res == "eod":
@@ -126,3 +156,40 @@ class ThetaProvider(Provider):
                 raise MissingData(f"option quotes {d} {expiry} {right} x{len(missing)} strikes {res}")
             self.fetcher.fetch_options(d, expiry, right, missing, t0, t1, res)
         return self.cache.read_options(res, d, expiry, right, strikes, t0, t1)
+
+    # ---------------------------------------------------------------- lab-engine additions
+    def confirm_expiry(self, d, expiry, cfg, minute, spot, vix):
+        if expiry not in self.list_expiries(d):
+            return False
+        tgt, _ = rules.target_strikes(spot, vix, cfg)
+        m = CLOSE_MIN if cfg.resolution == "eod" else minute
+        self._ctx[d] = (m, tgt, cfg.resolution)
+        ok = self.cache.trial_get(d, expiry)
+        if ok is None:
+            if self.fetcher is None:
+                return False
+            ok = self._trial(d, expiry, m, tgt, cfg.resolution)
+        return bool(ok)
+
+    def chain_snapshot(self, d, expiry, minute, res, spot):
+        """ONE bulk snapshot of the whole chain at one bar (Stage A for delta mode) + optional Greeks."""
+        m = CLOSE_MIN if res == "eod" else minute
+        if not self.cache.bulk_done(res, d, expiry, m):
+            if self.fetcher is None:
+                raise MissingData(f"bulk snapshot {d} {expiry} {m} {res}")
+            self.fetcher.fetch_bulk(d, expiry, m, res)
+        ks = [k for k in self.list_strikes(d, expiry) if 0.75 * spot <= k <= 1.25 * spot]
+        frames = []
+        for r in ("P", "C"):
+            q = self.cache.read_options(res, d, expiry, r, ks, m, m)
+            if len(q):
+                frames.append(q.assign(right=r))
+        if not frames:
+            return pd.DataFrame(columns=["right", "strike", "bid", "ask"])
+        snap = pd.concat(frames, ignore_index=True)[["right", "strike", "bid", "ask"]]
+        if self.use_greeks:
+            g = (self.fetcher.fetch_greeks(d, expiry, m, res) if self.fetcher is not None
+                 else (lambda x: x if x is not None and len(x) else None)(self.cache.greeks_get(res, d, expiry, m)))
+            if g is not None and len(g):
+                snap = snap.merge(g[["right", "strike", "delta"]], on=["right", "strike"], how="left")
+        return snap

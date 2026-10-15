@@ -1,0 +1,9 @@
+# Bull put spread (optionally waiting after VIX spikes) and put broken-wing butterfly.
+name: spy_other_structures
+base: {ticker: SPY, profile: green, resolution: 15m, entry_cadence: monthly, fill: natural}
+runs:
+  - {strategy: iron_condor}
+grid:
+  strategy: [bull_put_spread, put_bwb]
+  delta: [0.10, 0.16, 0.25]
+  post_spike_wait: [0, 5, 10]

@@ -1,0 +1,10 @@
+# Forced-entry replay through data/stress_windows.csv (APPROXIMATE month-level windows), unit mode.
+name: stress
+type: stress
+every_day: false
+base: {ticker: SPY, strategy: iron_condor, resolution: 15m, fill: natural}
+runs:
+  - {profile: green}
+  - {profile: experiment_all_off}
+  - {profile: green, delta: 0.16, dte: 45}
+  - {profile: green, delta: 0.16, dte: 45, stop: none}

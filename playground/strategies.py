@@ -6,6 +6,7 @@ strangle, ratio spreads, naked jade lizard) are deliberately NOT implemented; ma
 """
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 
 from . import rules
@@ -52,6 +53,7 @@ class Chain:
         self.cfg, self.spot, self.vix, self.width = cfg, spot, vix, width
         self.strikes = sorted(strikes)
         self.q, self.d = quotes, deltas
+        self._ks = {r: sorted(k for (rr, k) in quotes if rr == r) for r in "PC"}
 
     def has(self, right: str, k: float) -> bool:
         return (right, round(k, 4)) in self.q
@@ -63,28 +65,32 @@ class Chain:
         return self.d.get((right, round(k, 4)))
 
     def listed(self, k: float) -> float | None:
-        """Nearest LISTED strike with a valid quote on either right within half a width, else None."""
-        c = [s for s in self.strikes if (("P", round(s, 4)) in self.q or ("C", round(s, 4)) in self.q)]
+        """Nearest LISTED strike with a valid quote on either right within one width, else None."""
+        c = sorted(set(self._ks["P"]) | set(self._ks["C"]))
         if not c:
             return None
         s = min(c, key=lambda x: abs(x - k))
         return s if abs(s - k) <= self.width else None
 
     def wing(self, right: str, short_k: float, away: int, dist: float | None = None) -> float | None:
-        """Listed strike `dist` (default width) beyond short_k (away=+1 above / -1 below) with a valid quote."""
+        """Quoted strike nearest to `dist` (default width) beyond short_k (away=+1 above / -1 below)."""
         tgt = short_k + away * (self.width if dist is None else dist)
-        cands = [s for s in self.strikes if self.has(right, s) and (s - short_k) * away > 0]
-        if not cands:
+        ks = self._ks[right]
+        i = bisect.bisect_left(ks, tgt)
+        best = None
+        for j in (i - 1, i):
+            if 0 <= j < len(ks) and (ks[j] - short_k) * away > 1e-9:
+                if best is None or abs(ks[j] - tgt) < abs(best - tgt):
+                    best = ks[j]
+        if best is None or abs(best - tgt) > max(self.width * 0.51, 1e-9):
             return None
-        s = min(cands, key=lambda x: abs(x - tgt))
-        return s if abs(s - tgt) <= max(self.width * 0.51, 1e-9) else None
+        return best
 
     def short(self, right: str, target_delta: float | None = None) -> float | None:
         """Short strike by the configured rule (vix-distance or delta). Needs bid>0 and a long wing."""
         away = -1 if right == "P" else 1
         rule = self.cfg.strike_rule
-        ks = [s for s in self.strikes if self.has(right, s) and self.quote(right, s)[0] > 0
-              and self.wing(right, s, away) is not None]
+        ks = [s for s in self._ks[right] if self.q[(right, s)][0] > 0 and self.wing(right, s, away) is not None]
         if not ks:
             return None
         if rule["mode"] == "delta":

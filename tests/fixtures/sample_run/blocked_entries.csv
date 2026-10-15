@@ -1,0 +1,13 @@
+date,ticker,reason
+2016-01-04,SPY,event
+2016-01-19,SPY,event
+2016-02-08,SPY,event
+2016-02-16,SPY,event
+2016-03-14,SPY,gate
+2016-03-21,SPY,event
+2016-04-04,SPY,gate
+2016-05-02,SPY,event
+2016-06-13,SPY,event
+2016-07-11,SPY,gate
+2016-07-25,SPY,event
+2016-09-06,SPY,event

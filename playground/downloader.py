@@ -6,12 +6,10 @@
 from __future__ import annotations
 
 import json
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
-from pathlib import Path
 
 import pandas as pd
 
@@ -26,6 +24,10 @@ from .theta_client import ThetaClient
 
 class FetchError(MissingData):
     pass
+
+
+class BudgetExceeded(RuntimeError):
+    """--max-gb / --max-hours hard stop (per ticker). The cache stays consistent; re-run to continue."""
 
 
 def candidate_days(cfg: Config, daily: pd.DataFrame, vix: pd.Series, evx: EventIndex | None) -> list[date]:
@@ -71,12 +73,30 @@ class Fetcher:
         self.rows = 0
         self.parallel = True
         self._bars_lock = threading.Lock()
+        self.max_gb = self.max_hours = None
+        self._t0 = time.monotonic()
+        self._disk = (0.0, 0)
+        self.greeks_supported: bool | None = None
+
+    def set_limits(self, max_gb=None, max_hours=None):
+        self.max_gb, self.max_hours, self._t0 = max_gb, max_hours, time.monotonic()
+
+    def _check(self):
+        if self.max_hours is not None and (time.monotonic() - self._t0) / 3600.0 > self.max_hours:
+            raise BudgetExceeded(f"--max-hours {self.max_hours} reached for {self.symbol}")
+        if self.max_gb is not None:
+            now = time.monotonic()
+            if now - self._disk[0] > 20:
+                self._disk = (now, self.cache.disk_bytes())
+            if self._disk[1] / 1e9 > self.max_gb:
+                raise BudgetExceeded(f"--max-gb {self.max_gb} reached for {self.symbol} ({self._disk[1] / 1e9:.2f} GB)")
 
     def serial(self) -> "Fetcher":
         f = Fetcher(self.client, self.cache, self.tdays, 1, self.chunk, self.entry_fetch, self.log, self.symbol)
         f.failed = self.failed
         f.parallel = False
         f._bars_lock = self._bars_lock
+        f.max_gb, f.max_hours, f._t0 = self.max_gb, self.max_hours, self._t0
         return f
 
     def _fail(self, what: str, r):
@@ -100,6 +120,7 @@ class Fetcher:
 
     # ---------------------------------------------------------- underlying bars
     def fetch_bars(self, d: date, res: str):
+        self._check()
         with self._bars_lock:
             if not self.cache.has_bars(res, d):
                 self._fetch_bars(d, res)
@@ -123,6 +144,7 @@ class Fetcher:
         return 390 if res == "eod" else int(res.rstrip("m"))
 
     def fetch_options(self, d, expiry, right, strikes, t0, t1, res):
+        self._check()
         if res == "eod":
             return self._fetch_range(d, expiry, right, strikes, res)
         if t0 == t1:
@@ -135,22 +157,47 @@ class Fetcher:
                 return list(ex.map(fn, items))
         return [fn(x) for x in items]
 
+    def fetch_bulk(self, d, expiry, m, res):
+        """ONE bulk snapshot (all strikes, both rights) at one bar. TODO-VERIFY endpoint form (probe section c2)."""
+        self._check()
+        self._fetch_bulk(d, expiry, [], m, res)
+        self.cache.bulk_set(res, d, expiry, m)
+
+    def _fetch_bulk(self, d, expiry, strikes, m, res):
+        step = self._step(res)
+        df, r = self.client.option_quotes_bulk(expiry, d, res, m, m + step, self.symbol)
+        if not r.ok:
+            self._fail(f"bulk {d} {expiry}", r)
+        df = df[(df.ts.dt.hour * 60 + df.ts.dt.minute) == m]
+        universe = set(self.cache.strikes(expiry) or []) | set(strikes) | set(df.strike)
+        for rt in ("P", "C"):
+            part = df[df.right == rt]
+            self.cache.write_options(res, d, expiry, rt, universe, m, m, part)
+            self.rows += len(part)
+
+    def fetch_greeks(self, d, expiry, m, res):
+        """Greeks snapshot (delta/iv/underlying_price) or None if the plan/endpoint does not provide it."""
+        if self.greeks_supported is False:
+            return None
+        got = self.cache.greeks_get(res, d, expiry, m)
+        if got is not None:
+            return got if len(got) else None
+        self._check()
+        df, r = self.client.greeks_bulk(expiry, d, res, m, m + self._step(res), self.symbol)
+        if not r.ok:                      # 403/404/etc: endpoint unavailable -> stop asking, BS fallback
+            self.greeks_supported = False
+            self.failed.append(f"greeks unsupported: {r.error[:120]}")
+            return None
+        self.cache.greeks_put(res, d, expiry, m, df if len(df) else None)
+        return df if len(df) else None
+
     def _fetch_entry(self, d, expiry, right, strikes, m, res):
         step = self._step(res)
         if self.entry_fetch == "bulk":
-            df, r = self.client.option_quotes_bulk(expiry, d, res, m, m + step)
-            if not r.ok:
-                self._fail(f"bulk {d} {expiry}", r)
-            df = df[(df.ts.dt.hour * 60 + df.ts.dt.minute) == m]
-            universe = set(self.cache.strikes(expiry) or []) | set(strikes) | set(df.strike)
-            for rt in ("P", "C"):
-                part = df[df.right == rt]
-                self.cache.write_options(res, d, expiry, rt, universe, m, m, part)
-                self.rows += len(part)
-            return
+            return self._fetch_bulk(d, expiry, strikes, m, res)
 
         def one(k):
-            df, r = self.client.option_quotes(expiry, right, k, d, d, res, m, m + step)
+            df, r = self.client.option_quotes(expiry, right, k, d, d, res, m, m + step, self.symbol)
             if not r.ok:
                 self._fail(f"quote {d} {expiry} {right}{k}", r)
             return k, df[(df.ts.dt.hour * 60 + df.ts.dt.minute) == m]
@@ -168,9 +215,9 @@ class Fetcher:
 
         def one(k):
             if res == "eod":
-                df, r = self.client.option_eod(expiry, right, k, d, end)
+                df, r = self.client.option_eod(expiry, right, k, d, end, self.symbol)
             else:
-                df, r = self.client.option_quotes(expiry, right, k, d, end, res, OPEN_MIN, CLOSE_MIN)
+                df, r = self.client.option_quotes(expiry, right, k, d, end, res, OPEN_MIN, CLOSE_MIN, self.symbol)
             if not r.ok:
                 self._fail(f"quote {d}..{end} {expiry} {right}{k}", r)
             return k, df
@@ -186,48 +233,85 @@ class Fetcher:
                 self.rows += len(part)
 
 
-def stage_a(provider, fetcher: Fetcher, cfg: Config, evx, log, threads: int = 2, limit: int | None = None) -> dict:
-    """Prefetch the narrow entry snapshot for every candidate day (resumable)."""
+def stage_a(provider, fetcher: Fetcher, cfg: Config, evx, log, threads: int = 2, limit: int | None = None,
+            lab: bool = False, tinfo=None) -> dict:
+    """Prefetch the narrow entry snapshot for every candidate day (resumable).
+    lab=True: only the cadence's entry days; delta mode fetches ONE bulk snapshot per expiry (no +/-10 strike band)."""
+    from .lab import entry_schedule
+    from .strategies import STRATEGIES
+    from .tickers import load_tickers, spread_width
     daily, vix = provider.get_underlying_daily(), provider.get_vix_daily()
-    days = candidate_days(cfg, daily, vix, evx)[:limit]
+    ccfg = cfg.replace(entry_every=1) if lab else cfg
+    days = candidate_days(ccfg, daily, vix, evx)
+    sched = {}
+    if lab:
+        alld = list(daily.index)
+        i0 = max(6, next((j for j, x in enumerate(alld) if not cfg.start_date or str(x) >= cfg.start_date), 6))
+        i1 = max([j for j, x in enumerate(alld) if not cfg.end_date or str(x) <= cfg.end_date] or [len(alld) - 1])
+        sched, _ = entry_schedule(alld, i0, i1, cfg.replace(dte=[cfg.dte_target - 7, cfg.dte_target, cfg.dte_target + 7])
+                                  if cfg.dte_target else cfg)
+        days = [d for d in days if d in sched]
+        tinfo = tinfo or load_tickers().get(cfg.ticker)
+    days = days[:limit]
     vx = vix.reindex(daily.index).ffill()
     pos = {d: i for i, d in enumerate(daily.index)}
     done, errors = [], []
+    stopped = []
     serial = fetcher.serial()
-    sprov = type(provider)(provider.cache, serial, provider.symbol)
+    sprov = provider.clone(serial)
     t_start = time.time()
+    delta_mode = cfg.strike_rule["mode"] == "delta"
+    strat = STRATEGIES.get(cfg.strategy)
 
     def work(d):
         try:
             i = pos[d]
-            try:
-                bars = sprov.get_underlying_bars(d, cfg.resolution)
-                mins = [t.hour * 60 + t.minute for t in bars.index]
-            except MissingData:      # e.g. stock history 403 on this plan: entry minutes come from the grid
-                mins = bar_minutes(cfg.resolution)
+            # the entry bar grid is the engine's: daily spot -> the 16:00 print, otherwise the resolution grid
+            # (never the Theta stock endpoint: stock history is 403 on Standard)
+            mins = [CLOSE_MIN] if (cfg.spot_source == "daily" and lab) or cfg.resolution == "eod" \
+                else bar_minutes(cfg.resolution)
             spot, v = float(daily["open"].iloc[i]), float(vx.iloc[i - 1])
             tp_, tc_ = rules.target_strikes(spot, v, cfg)
             for m in entry_minutes(d, cfg):
                 bm = next((x for x in mins if x >= m), None)
                 if bm is None:
                     continue
-                for e in sprov.entry_expiries(d, cfg, bm, spot, v):
+                hint = sched.get(d)
+                if hint is not None:
+                    exps = [hint] if sprov.confirm_expiry(d, hint, cfg, bm, spot, v) else []
+                else:
+                    exps = sprov.entry_expiries(d, cfg, bm, spot, v)
+                for e in exps:
                     ks = sprov.list_strikes(d, e)
+                    if lab and delta_mode:
+                        sprov.chain_snapshot(d, e, bm, cfg.resolution, spot)
+                        continue
+                    if lab:
+                        w = spread_width(spot, ks, cfg, tinfo)
+                        need = strat.needed_strikes(ks, cfg, spot, v, w)
+                        for right, kk in need.items():
+                            sprov.get_option_quotes(d, e, right, kk, bm, bm, cfg.resolution)
+                        continue
                     for right, tgt in (("P", tp_), ("C", tc_)):
                         _, need = rules.entry_strikes(ks, tgt, right, cfg)
                         sprov.get_option_quotes(d, e, right, need, bm, bm, cfg.resolution)
             return d, None
+        except BudgetExceeded as ex:
+            stopped.append(str(ex))
+            return d, "budget"
         except MissingData as ex:
             return d, str(ex)
 
-    with ThreadPoolExecutor(max(1, threads)) as pool:
+    with ThreadPoolExecutor(max(1, min(threads, 4))) as pool:
         for n, (d, err) in enumerate(pool.map(work, days), 1):
+            if err == "budget":
+                continue
             (errors if err else done).append((d, err) if err else d)
             if n % 25 == 0 or n == len(days):
                 el = time.time() - t_start
-                log(f"stage A {n}/{len(days)} days | {fetcher.client.stats['requests']} req | "
+                log(f"stage A {fetcher.symbol} {n}/{len(days)} days | {fetcher.client.stats['requests']} req | "
                     f"{fetcher.client.stats['bytes'] / 1e6:.1f} MB | {el:.0f}s")
-    return {"candidates": len(days), "done": len(done), "errors": errors}
+    return {"candidates": len(days), "done": len(done), "errors": errors, "stopped": sorted(set(stopped))}
 
 
 def write_manifest(cache: DataCache, fetcher: Fetcher, extra: dict) -> dict:

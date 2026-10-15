@@ -5,7 +5,6 @@ import json
 import math
 from pathlib import Path
 
-from . import rules
 from .config import Config
 from .downloader import candidate_days
 from .report import table
@@ -77,7 +76,6 @@ def make_plan(cfg: Config, daily, vix, evx, *, threads=(2, 4), max_rps=5.0, conc
         else:
             a_req_day = n_exp * 2 * strikes_per_side + n_exp + 1 / 20 + n_trial
             a_rows_day = n_exp * 2 * strikes_per_side * n_entry_bars
-        bars_rows = len(cands) * B / 1.0
         chunks = math.ceil(avg_hold_cal_days / chunk_days)
         b_req_trade = 4 * chunks
         b_rows_trade = 4 * (avg_hold_cal_days * 5 / 7) * B
@@ -108,3 +106,54 @@ def make_plan(cfg: Config, daily, vix, evx, *, threads=(2, 4), max_rps=5.0, conc
                    table(nrows, ["res", "requests", "rows", "GB", "wall-clock"]),
                    "month budget: 30 days = 720h. Numbers marked ASSUMED are not measured."]
     return "\n".join(out)
+
+
+LEGS_BY_STRATEGY = {"iron_condor": 4, "iron_butterfly": 4, "bull_put_spread": 2, "put_bwb": 3,
+                    "cash_secured_put": 1, "covered_call": 1}
+
+
+def make_lab_plan(cfg: Config, daily_by_ticker: dict, vix, evx, cadences, *, max_rps=5.0, concurrency_limit=4,
+                  value_limit=2, chunk_days=10, avg_hold_cal_days=21, results_dir="results", data_dir="data") -> str:
+    """Per-ticker x per-cadence estimates for the lab engine (Stage A bulk/per-strike + Stage B legs)."""
+    from .lab import entry_schedule
+    lat, lat_src = load_latency(results_dir)
+    bpr, bpr_src = bytes_per_row(data_dir)
+    delta_mode = cfg.strike_rule["mode"] == "delta"
+    B = bars_per_day(cfg.resolution)
+    legs = LEGS_BY_STRATEGY.get(cfg.strategy, 4)
+    L = [f"LAB PLAN strategy={cfg.strategy} mode={'delta(bulk snapshot)' if delta_mode else 'vix-distance(per-strike band)'} "
+         f"dte_target={cfg.dte_target or cfg.dte[1]} res={cfg.resolution} legs/trade={legs}",
+         f"latency {lat:.2f}s/request ({lat_src}); {bpr:.0f} B/row ({bpr_src}); limits: Standard {concurrency_limit} "
+         f"concurrent / Value {value_limit}; max_rps={max_rps}",
+         "Assumptions (not measured): hold ~%d calendar days; Stage-B chunk %d days; bulk snapshot ~1600 rows/request; "
+         "+1 trial quote and +1 Greeks request per expiry (cached)." % (avg_hold_cal_days, chunk_days)]
+    rows = []
+    for ticker, daily in daily_by_ticker.items():
+        for cad in cadences:
+            c = cfg.replace(ticker=ticker, entry_cadence=cad, entry_every=1)
+            alld = list(daily.index)
+            i0 = max(6, next((j for j, x in enumerate(alld) if not c.start_date or str(x) >= c.start_date), 6))
+            i1 = max([j for j, x in enumerate(alld) if not c.end_date or str(x) <= c.end_date] or [len(alld) - 1])
+            cc = c.replace(dte=[c.dte_target - 7, c.dte_target, c.dte_target + 7]) if c.dte_target else c
+            sched, _ = entry_schedule(alld, i0, i1, cc)
+            cands = set(candidate_days(c, daily, vix, evx))
+            entries = len([d for d in sched if d in cands])
+            years = max((alld[i1] - alld[i0]).days / 365.25, 1e-9)
+            n_exp = 1 if (cad == "monthly" or cfg.scale_in == 4) else cfg.entry_expiries
+            strikes_side = 2 * cfg.band_strikes + 1 + 5
+            a_req = n_exp * ((2 + 1) if delta_mode else (1 + 2 * strikes_side))      # trial+bulk+greeks | trial+bands
+            a_rows = n_exp * (1600 if delta_mode else 2 * strikes_side)
+            b_req = legs * math.ceil(avg_hold_cal_days / chunk_days)
+            b_rows = legs * avg_hold_cal_days * 5 / 7 * B
+            req = entries * (a_req + b_req)
+            nrows = entries * (a_rows + b_rows)
+            t2 = max(req * lat / min(2, concurrency_limit), req / max_rps) / 3600
+            t4 = max(req * lat / min(4, concurrency_limit), req / max_rps) / 3600
+            rows.append([ticker, cad, entries, f"{entries / years:.0f}/yr", f"{req:,.0f}", f"{nrows / 1e6:,.1f}M",
+                         f"{nrows * bpr / 1e9:.2f}", f"{t2:.2f}h", f"{t4:.2f}h"])
+    L.append(table(rows, ["ticker", "cadence", "entries", "rate", "requests", "rows", "GB", "wall@2thr(Value)", "wall@4thr(Standard)"]))
+    L.append("Entry counts come from the cached daily history (gate/guards/events applied); expirations/strike listings "
+             "(esp. GLD/TLT far-dated) can reduce them (logged as `cadence` blocks at run time).")
+    if lat_src.startswith("ASSUMED"):
+        L.append("WARNING: latency is an assumption; run `probe` first for a measured number.")
+    return "\n".join(L)

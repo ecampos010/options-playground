@@ -20,7 +20,7 @@ import json
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 import pandas as pd
@@ -34,6 +34,7 @@ class EP:
     STRIKES = "/v3/option/list/strikes"               # VERIFIED (Standard)
     OPT_QUOTE = "/v3/option/history/quote"            # VERIFIED single contract (Standard); bulk form TODO-VERIFY
     OPT_EOD = "/v3/option/history/eod"                # TODO-VERIFY
+    OPT_GREEKS = "/v3/option/history/greeks/all"      # TODO-VERIFY (delta, implied_vol, underlying_price fields?)
     STK_QUOTE = "/v3/stock/history/quote"             # 403 on Standard account (Stock: FREE)
     STK_EOD = "/v3/stock/history/eod"                 # 403 on Standard account
     IDX_PRICE = "/v3/index/history/price"             # 403 on Standard account (Index: FREE)
@@ -60,6 +61,8 @@ class P:
     def t(minute: int) -> str:
         return f"{minute // 60:02d}:{minute % 60:02d}:00"
 
+
+CONCURRENCY_CAP = 4   # ThetaData Standard allows 4 concurrent requests (Value: 2); hard cap regardless of --threads
 
 NO_DATA_STATUS = 472   # VERIFIED: "HTTP 472 No data found", empty body = not listed/tradable that date
 
@@ -106,6 +109,7 @@ class ThetaClient:
         self.s = session
         self.limiter = RateLimiter(max_rps)
         self.timeout, self.max_retries, self._sleep = timeout, max_retries, sleep
+        self._sem = threading.BoundedSemaphore(CONCURRENCY_CAP)
         self.stats = {"requests": 0, "bytes": 0, "throttled": 0, "errors": 0, "empty": 0, "no_data": 0,
                       "denied": 0, "latency_sum": 0.0, "ok_requests": 0}
         self._lock = threading.Lock()
@@ -120,7 +124,8 @@ class ThetaClient:
             self.limiter.wait()
             t0 = time.monotonic()
             try:
-                r = self.s.get(url, params=params, timeout=self.timeout)
+                with self._sem:
+                    r = self.s.get(url, params=params, timeout=self.timeout)
                 lat = time.monotonic() - t0
                 status, text = r.status_code, r.text
             except Exception as e:   # connection errors: back off and retry
@@ -246,6 +251,27 @@ class ThetaClient:
         r = self.get(EP.OPT_QUOTE, p)
         return (self.norm_quotes(self.parse(r.text)) if r.ok and not r.empty
                 else self.norm_quotes(pd.DataFrame())), r
+
+    def greeks_bulk(self, expiry: date, d: date, interval: str, t0: int, t1: int, symbol="SPY",
+                    strike: float | None = None, right: str | None = None):
+        """Greeks at one bar: all strikes (strike=*) or one contract. TODO-VERIFY endpoint, params and columns
+        (expected: delta, implied_vol, underlying_price). Returns (DataFrame right,strike,delta,iv,underlying_price, r)."""
+        p = {P.symbol: symbol, P.expiration: P.d(expiry), P.strike: P.BULK_STRIKE if strike is None else P.strike_val(strike),
+             P.right: P.BOTH if right is None else P.RIGHT[right], P.interval: interval, P.date: P.d(d),
+             P.start_time: P.t(t0), P.end_time: P.t(t1)}
+        r = self.get(EP.OPT_GREEKS, p)
+        cols = ["right", "strike", "delta", "iv", "underlying_price"]
+        if not r.ok or r.empty:
+            return pd.DataFrame({c: pd.Series([], dtype=float if c != "right" else object) for c in cols}), r
+        df = self.parse(r.text)
+        df.columns = [c.lower() for c in df.columns]
+        out = pd.DataFrame({
+            "right": df["right"].astype(str).str.upper().str[0] if "right" in df else (right or ""),
+            "strike": df["strike"].astype(float) if "strike" in df else strike,
+            "delta": df["delta"].astype(float) if "delta" in df else float("nan"),
+            "iv": next((df[c].astype(float) for c in ("implied_vol", "iv", "implied_volatility") if c in df), float("nan")),
+            "underlying_price": df["underlying_price"].astype(float) if "underlying_price" in df else float("nan")})
+        return out[cols], r
 
     def option_eod(self, expiry: date, right: str, strike: float, d0: date, d1: date, symbol="SPY"):
         p = {P.symbol: symbol, P.expiration: P.d(expiry), P.strike: P.strike_val(strike),

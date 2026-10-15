@@ -1,0 +1,9 @@
+# QQQ, IWM, GLD, TLT with the 16-delta baseline and a short list. Width = 0.7% of spot rounded to the listed increment.
+name: other_tickers
+base: {profile: green, strategy: iron_condor, resolution: 15m, entry_cadence: monthly, fill: natural}
+runs:
+  - {ticker: SPY, delta: 0.16, dte: 45}  # reference
+grid:
+  ticker: [QQQ, IWM, GLD, TLT]
+  delta: [0.10, 0.16, 0.20]
+  dte: [30, 45]

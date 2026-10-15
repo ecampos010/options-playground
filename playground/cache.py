@@ -95,6 +95,28 @@ class DataCache:
             m["_grid"] = grid
             self._atomic_write_text(self._trial_path(d), json.dumps(m))
 
+    def bulk_done(self, res, d, expiry, m) -> bool:
+        with self._lock:
+            return bool(self._trial_map(d).get(f"bulk|{res}|{expiry}|{m}"))
+
+    def bulk_set(self, res, d, expiry, m):
+        with self._lock:
+            mp = self._trial_map(d)
+            mp[f"bulk|{res}|{expiry}|{m}"] = True
+            self._atomic_write_text(self._trial_path(d), json.dumps(mp))
+
+    def greeks_put(self, res, d, expiry, m, df: pd.DataFrame | None):
+        """df None/empty = known unsupported/no data (negative cache)."""
+        p = self.root / "greeks" / f"res={res}" / f"date={d}" / f"expiry={expiry}" / f"m={m}.parquet"
+        d0 = df if df is not None else pd.DataFrame({"right": pd.Series([], dtype=object), "strike": pd.Series([], dtype=float),
+                                                      "delta": pd.Series([], dtype=float), "iv": pd.Series([], dtype=float),
+                                                      "underlying_price": pd.Series([], dtype=float)})
+        self._write_parquet(p, d0)
+
+    def greeks_get(self, res, d, expiry, m) -> pd.DataFrame | None:
+        p = self.root / "greeks" / f"res={res}" / f"date={d}" / f"expiry={expiry}" / f"m={m}.parquet"
+        return pd.read_parquet(p) if p.exists() else None
+
     # ------------------------------------------------------------ underlying bars
     def _bars_path(self, res, d):
         return self.root / "underlying_bars" / f"res={res}" / f"date={d}.parquet"

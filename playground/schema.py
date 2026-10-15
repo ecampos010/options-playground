@@ -75,7 +75,9 @@ def validate_trades(df: pd.DataFrame) -> list[str]:
     except Exception as e:
         errs.append(f"timestamp parse error: {e}")
     # pnl cannot lose more than the exact max loss (+ fees/hedge slack for adjustments)
-    slack = df["fees_per_contract"] + df["adj_cost_per_contract"].clip(lower=0) + df["hedge_cost_per_contract"].abs() + 1e-6
+    # natural exit fills can exceed the structure's width by the quoted spreads: allow max($25, 5% of collateral)
+    slack = (df["fees_per_contract"] + df["adj_cost_per_contract"].clip(lower=0) + df["hedge_cost_per_contract"].abs()
+             + (0.05 * df["collateral_per_contract"]).clip(lower=25.0) + 1e-6)
     unadj = df["adj_count"] == 0
     if ((-df["pnl_per_contract"] > df["collateral_per_contract"] + slack) & unadj & (df["hedge_cost_per_contract"] == 0)).any():
         errs.append("pnl_per_contract loses more than collateral_per_contract on an unadjusted trade")

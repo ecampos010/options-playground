@@ -81,7 +81,48 @@ event calendar is used.
 * E3 (7-14 DTE) with the unchanged VIX-distance strike rule and 0.50 minimum credit may produce almost no trades.
 * Stage A is intentionally per-strike by default (slow but least assumption-heavy); bulk is opt-in.
 
-## Verified vs unverified
+## Lab engine: multi-ticker, multi-strategy, management rules (TASK A)
+
+The original Green engine (`backtest`, `matrix`, `ladder`) is unchanged. The **lab engine** adds five underlyings,
+delta strikes, six defined-risk strategies, a management-rule library and standardized trade logs that the
+reporting/portfolio layer consumes (`docs/TRADE_LOG_SCHEMA.md` is the contract; sample in `tests/fixtures/sample_run/`).
+
+```bash
+python -m playground spot --tickers SPY,QQQ,IWM,GLD,TLT --validate massive,greeks,parity   # Alpaca minute bars (UNVERIFIED)
+python -m playground plan --engine lab --tickers SPY,QQQ --strike-mode delta --delta 0.16 --entry-cadences monthly,weekly
+python -m playground download --engine lab --tickers SPY --entry-cadence monthly --delta 0.16 --max-gb 20 --max-hours 12
+python -m playground run --ticker SPY --strategy iron_condor --delta 0.16 --dte-target 45 --entry-cadence monthly \
+       --trigger distance --trigger-value 0.02 --action roll_tested --max-rolls 2        # unit mode by default
+python -m playground sweep sweeps/spy_core.yaml [--limit N]     # resumable; prints configs tried + half-vs-half
+python -m playground stress --only covid_crash_2020             # forced entries, approximate month-level windows
+python -m playground ladder                                      # now includes experiment_* profiles + Level column
+python -m playground export-outputs                              # derived logs only (never data/, cache/, parquet)
+python -m playground purge-vendor-data [--yes] [--include-spot]  # dry run unless --yes; writes purge_log.md
+```
+Offline demo: add `--provider synthetic` to `run`, `sweep`, `stress`, `plan`. Run order and the Nov 10 stop:
+`docs/RUN_ORDER.md`.
+
+| area | flags |
+|---|---|
+| universe | `--ticker SPY/QQQ/IWM/GLD/TLT` (`profiles/tickers.yaml`), `--width-mode auto/pct/fixed`, `--width-pct 0.7%`, `--min-credit-pct 10%` |
+| strikes | `--strike-mode vix-distance/delta`, `--delta`, `--put-delta`, `--call-delta`, `--dte-target 30/45/60/90`, `--entry-cadence monthly/weekly/twice-weekly/daily`, `--scale-in 1/4` |
+| strategies | `--strategy iron_condor/iron_butterfly/bull_put_spread/put_bwb/cash_secured_put/covered_call` (undefined-risk structures are not implemented) |
+| exits | `--tp`, `--ifly-tp 25/50`, `--stop-mult 1.5/2/3/off`, `--stop-dollar`, `--time-exit 0/21/7`, `--breach on/off` |
+| triggers | `--trigger distance/delta --trigger-value ...  --action none/exit/roll_tested/roll_condor/roll_untested/close_tested_spread/hedge_put_call/hedge_shares`, `--max-rolls`, `--roll-credit-only`, `--roll-to-pct`, `--hedge-delta`, `--hedge-expiry`, `--stock-slip-bps` |
+| entry filters | `--term-filter on` (VIX/VIX3M > 1), `--post-spike-wait N`, `--min-ivr 0/30/50`, `--delta-cap 150/200`, existing gate/upside/event/cb |
+| fills / fees | next-bar natural fills for every trigger/stop/exit; `--fee-per-contract 0.05` per contract per leg |
+| spot | `--spot-source alpaca/parity/daily`, `--spot-fallback parity/none` (missing days are never interpolated) |
+| sizing | `--sizing equity-pct` (budget % of current equity) or `fixed1` (unit mode: 1 contract, no budget, circuit breaker off) |
+
+Interpretation notes (check these): a roll targets a short strike at `spot*(1-+roll_to_pct)` (default 1%), required to be
+closer to spot than the old short; `roll_condor` returns both shorts to their ENTRY distances from the current spot (both
+follow the move); stop = loss >= (N-1) x credit on the NATURAL close cost; counterfactual = original structure's expiry
+payoff from the settlement-day close (identical to quotes at expiry, needs no post-exit data); `hedge_cost_per_contract`
+= option premium or share slippage paid, the hedge P&L itself is inside `pnl_per_contract`; gate day/5-day moves use the
+traded underlying's own spot (VIX/VIX3M are global); a trade may lose slightly more than `collateral_per_contract` through
+natural exit spreads (the validator allows max($25, 5%)).
+
+## Verified vs unverified (ThetaData adapter, original engine)
 
 **Verified on a real ThetaData STANDARD options account** (Terminal v3 at 127.0.0.1:25503, run on a VPS):
 * `option/list/expirations` (SPY: 2,148 expirations 2012-06-01..2029-01-19) and `option/list/strikes`: HTTP 200.
@@ -114,3 +155,18 @@ missing bars (entry minutes come from the grid) but backtests will report data g
 Verified offline (`pytest`, 59 tests): sizing, gate/guards/event/circuit breaker, fills, exits, interest, caps,
 determinism, ladder single-switch profiles, cache coverage/idempotent re-runs, 472/403 handling, Friday-first
 fallback and half-dollar handling, probe/plan plumbing.
+
+
+### Verified vs unverified: lab engine additions
+
+| piece | status |
+|---|---|
+| strategies, payoff/max-loss math, management rules, counterfactuals, trade-log schema, sweep/stress/export/purge | tested offline (synthetic provider + hand-built markets) |
+| Alpaca spot path (`spot`: sip 1Min bars, adjustment raw/all, pagination, corporate actions) | **UNVERIFIED** - endpoint/params/response shape from memory; run `spot` on the VPS |
+| spot cross-checks (Massive minute bars, Theta Greeks `underlying_price`, put-call parity) | **UNVERIFIED** - Massive base URL/fields, Greeks endpoint/columns; stats land in `results/spot_validation.md` |
+| Greeks endpoint (`delta`, `implied_vol`, `underlying_price`) | **UNVERIFIED** - `probe` section f reports the fields; absent -> Black-Scholes delta from mid IV (logged in `meta.delta_source`) |
+| bulk chain snapshot (`strike=*`, `right=both`, one minute) | **UNVERIFIED** - `probe` sections c2/f report rows/latency or the exact error |
+| VIX3M / VXN / RVX / GVZ Cboe CSVs | **UNVERIFIED** URLs (VIX3M needed only for `--term-filter`; others skipped silently) |
+| ex-dividend dates (Alpaca corporate actions -> yfinance -> none) | **UNVERIFIED**; missing data prints a warning and flags stay 0 |
+| per-ticker option listings, strike increments by era, VIX options | **UNVERIFIED** until `probe` runs on the VPS for all five tickers |
+| delta-mode download volume/time | estimates only (`plan`); nothing measured on real data |

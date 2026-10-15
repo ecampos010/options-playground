@@ -9,11 +9,10 @@ MASSIVE_API_KEY) and are never printed or logged.
 from __future__ import annotations
 
 import json
-import math
 import os
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -279,7 +278,7 @@ class AlpacaSpot:
         self.ticker, self.store, self.rate = ticker, store, rate
 
     def bars_alpaca(self, d: date, res: str) -> pd.DataFrame:
-        if d in self.store.bad_days(self.ticker):
+        if str(d) in self.store.bad_days(self.ticker):
             raise MissingData(f"{self.ticker} {d}: flagged bad by validation")
         if not self.store.has_day(self.ticker, d):
             raise MissingData(f"{self.ticker} spot minute bars missing for {d}")
@@ -323,3 +322,169 @@ def route_spot(provider: Provider, d: date, res: str, source: str, fallback: str
         if fallback == "parity":
             return parity_bars(provider, d, res, rate, ref), "parity"
         raise
+
+
+# ---------------------------------------------------------------- Massive (cross-check) - UNVERIFIED
+class MassiveClient:
+    """Minute aggregates (Polygon-style REST). TODO-VERIFY base URL, path and response fields. Free tier reaches roughly
+    two years back: whatever range comes back is used and reported."""
+    BASE = "https://api.massive.com"
+
+    def __init__(self, session=None):
+        self.key = os.environ.get("MASSIVE_API_KEY")
+        if session is None:
+            import requests
+            session = requests.Session()
+        self.s = session
+
+    def minute_opens(self, ticker: str, d: date) -> pd.Series | None:
+        """Series (index = minute of day ET, value = bar open) or None if no data / not permitted."""
+        if not self.key:
+            raise RuntimeError("MASSIVE_API_KEY not set in the environment")
+        r = self.s.get(f"{self.BASE}/v2/aggs/ticker/{ticker}/range/1/minute/{d}/{d}",
+                       params={"adjusted": "false", "sort": "asc", "limit": 50000, "apiKey": self.key}, timeout=60)
+        if r.status_code != 200:
+            return None
+        res = r.json().get("results") or []
+        if not res:
+            return None
+        t = pd.to_datetime([x["t"] for x in res], unit="ms", utc=True).tz_convert("America/New_York")
+        m = t.hour * 60 + t.minute
+        s = pd.Series([x["o"] for x in res], index=m)
+        return s[(s.index >= OPEN_MIN) & (s.index < CLOSE_MIN)]
+
+
+def alpaca_opens(store: SpotStore, ticker: str, d: date) -> pd.Series | None:
+    if not store.has_day(ticker, d):
+        return None
+    df = store.read_day(ticker, d)
+    return pd.Series(df["px"].to_numpy(float), index=df["m"].to_numpy()) if len(df) else None
+
+
+def sample_days(store: SpotStore, ticker: str, start: date, end: date, n: int) -> list[date]:
+    ok = [d for d in trading_days(start, end) if store.has_day(ticker, d)
+          and len(store.read_day(ticker, d)) >= min_bars_needed(d)]
+    if len(ok) <= n:
+        return ok
+    idx = np.linspace(0, len(ok) - 1, n).astype(int)
+    return [ok[i] for i in idx]
+
+
+def pooled(pairs: list[tuple[pd.Series, pd.Series]]) -> dict:
+    parts_a, parts_b = [], []
+    for i, (x, y) in enumerate(pairs):
+        j = pd.concat([x.rename("a"), y.rename("b")], axis=1, join="inner").dropna()
+        parts_a.append(j["a"].reset_index(drop=True))
+        parts_b.append(j["b"].reset_index(drop=True))
+    if not parts_a:
+        return agreement_stats(pd.Series(dtype=float), pd.Series(dtype=float))
+    return agreement_stats(pd.concat(parts_a, ignore_index=True), pd.concat(parts_b, ignore_index=True))
+
+
+def validate_massive(store, mc, ticker, days) -> tuple[dict, dict, list[str]]:
+    pairs, per_day, got = [], {}, []
+    for d in days:
+        b = mc.minute_opens(ticker, d)
+        a = alpaca_opens(store, ticker, d)
+        if b is None or a is None:
+            continue
+        got.append(str(d))
+        pairs.append((a, b))
+        per_day[str(d)] = agreement_stats(a, b)["median_abs"]
+    return pooled(pairs), per_day, got
+
+
+def validate_parity(store, provider, ticker, days, rate, res="5m") -> tuple[dict, dict]:
+    pairs, per_day = [], {}
+    for d in days:
+        a = alpaca_opens(store, ticker, d)
+        daily = provider.get_underlying_daily()
+        if a is None or d not in daily.index:
+            continue
+        pos = daily.index.get_loc(d)
+        ref = float(daily["close"].iloc[pos - 1]) if pos else float(daily["close"].iloc[pos])
+        try:
+            pb = parity_bars(provider, d, res, rate, ref)
+        except MissingData:
+            continue
+        pm = pd.Series(pb["spot"].to_numpy(float), index=(pb.index.hour * 60 + pb.index.minute))
+        pairs.append((a, pm))
+        per_day[str(d)] = agreement_stats(a, pm)["median_abs"]
+    return pooled(pairs), per_day
+
+
+def validate_greeks_field(store, client, ticker, samples) -> tuple[dict, bool]:
+    """samples: [(day, expiry, strike, minute)]. Compares Alpaca spot with the Greeks response's underlying_price."""
+    a_list, b_list, exists = [], [], False
+    for d, e, k, m in samples:
+        df, r = client.greeks_bulk(e, d, "1m", m, m + 1, ticker, strike=k, right="C")
+        if r.ok and len(df) and df["underlying_price"].notna().any():
+            exists = True
+            a = alpaca_opens(store, ticker, d)
+            if a is not None and m in a.index:
+                a_list.append(float(a[m]))
+                b_list.append(float(df["underlying_price"].dropna().iloc[0]))
+    return agreement_stats(pd.Series(a_list), pd.Series(b_list)), exists
+
+
+def run_validations(args, store, tickers, start, end, alpaca_client):
+    """Orchestrates --validate massive,greeks,parity. Returns (markdown rows, notes). UNVERIFIED paths."""
+    want = {x.strip() for x in args.validate.split(",") if x.strip()}
+    rows, notes, bad = [], [], {}
+    for t in tickers:
+        days = sample_days(store, t, start, end, args.sample_days)
+        if not days:
+            notes.append(f"{t}: no covered days to validate")
+            continue
+        if "massive" in want:
+            try:
+                st, per, got = validate_massive(store, MassiveClient(), t, days)
+                rows.append(stats_row(f"{t}: Alpaca vs Massive", st,
+                                      f"Massive returned {len(got)}/{len(days)} sampled days ({', '.join(got[:2])}..)" if got
+                                      else "Massive returned nothing (free tier ~2y reach; key/plan?)"))
+                if got:
+                    notes.append(f"{t}: Massive range actually returned: {min(got)}..{max(got)}")
+                for d, v in per.items():
+                    if v is not None and v > 0.25:
+                        bad.setdefault(t, set()).add(d)
+            except Exception as e:
+                notes.append(f"{t}: Massive validation failed: {type(e).__name__}: {str(e)[:120]}")
+        if want & {"greeks", "parity"}:
+            try:
+                from .downloader import Fetcher
+                from . import factory
+                from .theta_client import ThetaClient
+                client = ThetaClient(max_rps=4.0)
+                cache = factory.ticker_cache(args.data_dir, t)
+                prov0 = factory.theta(t, args.data_dir, None, 0.036)
+                daily = prov0.get_underlying_daily()
+                fetcher = Fetcher(client, cache, list(daily.index), 2, symbol=t)
+                prov = factory.theta(t, args.data_dir, fetcher, 0.036)
+                if "parity" in want:
+                    st, per = validate_parity(store, prov, t, days[: max(2, args.sample_days // 2)], 0.036)
+                    rows.append(stats_row(f"{t}: Alpaca vs put-call-parity spot", st,
+                                          "div ignored, ATM strike, 5-20 DTE; includes bid/ask noise"))
+                    for d, v in per.items():
+                        if v is not None and v > 0.25:
+                            bad.setdefault(t, set()).add(d)
+                if "greeks" in want:
+                    samples = []
+                    for d in days[:3]:
+                        exps = [e for e in prov.list_expiries(d) if 7 <= (e - d).days <= 30]
+                        if not exps:
+                            continue
+                        e = exps[0]
+                        ks = prov.list_strikes(d, e)
+                        c = float(daily.loc[d, "close"])
+                        k = min([x for x in ks if x == int(x)] or ks, key=lambda x: abs(x - c))
+                        samples += [(d, e, k, m) for m in (10 * 60, 12 * 60, 14 * 60)]
+                    st, exists = validate_greeks_field(store, client, t, samples)
+                    rows.append(stats_row(f"{t}: Alpaca vs ThetaData Greeks underlying_price", st,
+                                          "field present" if exists else "underlying_price field NOT present / endpoint unavailable"))
+            except Exception as e:
+                notes.append(f"{t}: Theta-based validations failed: {type(e).__name__}: {str(e)[:120]}")
+    if getattr(args, "mark_bad", True):
+        for t, ds in bad.items():
+            store.set_bad_days(t, store.bad_days(t) | ds)
+            notes.append(f"{t}: {len(ds)} day(s) disagreed by > $0.25 (median) and were flagged; the engine will use the parity fallback there")
+    return rows, notes

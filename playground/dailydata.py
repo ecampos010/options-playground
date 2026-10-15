@@ -9,12 +9,12 @@ import pandas as pd
 CBOE_VIX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"  # TODO-VERIFY
 
 
-def spy_from_yfinance(start: date, end: date) -> pd.DataFrame | None:
+def spy_from_yfinance(start: date, end: date, symbol: str = "SPY") -> pd.DataFrame | None:
     try:
         import yfinance as yf   # optional dependency (not in requirements.txt)
     except Exception:
         return None
-    df = yf.download("SPY", start=str(start), end=str(end + pd.Timedelta(days=1)), auto_adjust=False,
+    df = yf.download(symbol, start=str(start), end=str(end + pd.Timedelta(days=1)), auto_adjust=False,
                      progress=False)
     if df is None or df.empty:
         return None
@@ -67,3 +67,28 @@ def ensure_daily(cache, client, start: date, end: date, log) -> dict:
     if vix is not None:
         cache.save_daily("VIX", vix)
     return out
+
+
+VOL_INDICES = {"VIX3M": "VIX3M_History.csv", "VXN": "VXN_History.csv", "RVX": "RVX_History.csv",
+               "GVZ": "GVZ_History.csv"}      # TODO-VERIFY URLs; skipped silently when unreachable
+
+
+def ensure_vol_indices(cache, log) -> dict:
+    """VIX3M (term-structure filter) and optional per-ticker vol indices from Cboe CSVs. UNVERIFIED."""
+    import requests
+    got = {}
+    for name, fn in VOL_INDICES.items():
+        try:
+            r = requests.get(f"https://cdn.cboe.com/api/global/us_indices/daily_prices/{fn}", timeout=60)
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            df = pd.read_csv(io.StringIO(r.text))
+            df.columns = [c.strip().lower() for c in df.columns]
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            cache.save_daily(name, df.set_index("date")[["open", "high", "low", "close"]].sort_index())
+            got[name] = len(df)
+        except Exception as e:
+            got[name] = None
+            if name == "VIX3M":          # the others are optional: skip silently
+                log(f"VIX3M unavailable ({type(e).__name__}); term-structure filter will be skipped")
+    return got

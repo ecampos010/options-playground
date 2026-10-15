@@ -10,18 +10,17 @@ import bisect
 import hashlib
 import json
 import math
-import random
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from . import bs, mgmt, rules, schema
-from .config import Config, apply_overrides
+from .config import Config
 from .engine import Leg, entry_minutes
 from .events import EventIndex
 from .provider import CLOSE_MIN, MissingData, Provider
@@ -342,7 +341,8 @@ class _Lab:
                     pos.q = {}
                     self._load(pos, d, ts)
             entry_bars = []
-            if d in sched and (self.max_entries is None or self.n_entries < self.max_entries):
+            in_win = self.window is None or (self.window["start"] <= str(d) <= self.window["end"])
+            if d in sched and in_win and (self.max_entries is None or self.n_entries < self.max_entries):
                 if not len(ts):
                     self._block(d, "nodata")
                 else:
@@ -519,8 +519,6 @@ class _Lab:
             credit = open_credit(new_legs, new_quotes, cfg.fill, 0.0)
             if cfg.roll_credit_only and credit - cost < 0:
                 return skip()
-            for l, q in zip(new_legs, new_quotes):
-                pos.q = pos.q or {}
             self._apply_adjust(pos, close_legs, new_legs, cost, credit, d, ts, action, new_quotes)
             return
         if action == "hedge_put_call":
@@ -601,6 +599,12 @@ class _Lab:
         hedge_usd = pos.hedge_cost_usd + slip_exit
         pnl = 100.0 * (pos.cash_ps - cost_ps) + self._share_pnl(pos, exit_spot) - fees - slip_exit
         pos.last_mark = pnl
+        while self.marks and self.marks[-1][0] == pos.id and self.marks[-1][1] == str(d):
+            self.marks.pop()                                 # replace today's EOD mark with the realised P&L
+        for k in range(len(self.marks) - 1, max(-1, len(self.marks) - 40), -1):
+            if self.marks[k][0] == pos.id and self.marks[k][1] == str(d):
+                del self.marks[k]
+                break
         self.marks.append((pos.id, str(d), round(pnl, 4)))
         self.pos.remove(pos)
         if not self.unit:
@@ -764,20 +768,27 @@ class _Lab:
         if cfg.strike_rule["mode"] == "delta":
             snap = self.p.chain_snapshot(d, e, minute, cfg.resolution, spot)
             has_delta = "delta" in snap.columns
+            snap = snap[(snap.ask > 0) & (snap.bid >= 0) & (snap.bid <= snap.ask)]
             for row in snap.itertuples():
-                if not rules.valid_quote(row.bid, row.ask):
+                qd[(row.right, round(float(row.strike), 4))] = (float(row.bid), float(row.ask))
+            pdelta = snap["delta"] if has_delta else pd.Series(np.nan, index=snap.index)
+            for r in ("P", "C"):                              # vectorised Black-Scholes delta from mid IV where absent
+                sub = snap[snap.right == r]
+                if sub.empty:
                     continue
-                k = round(float(row.strike), 4)
-                qd[(row.right, k)] = (float(row.bid), float(row.ask))
-                dl = getattr(row, "delta", None) if has_delta else None
-                if dl is None or dl != dl:
-                    dl = bs.delta_from_mid(0.5 * (row.bid + row.ask), spot, k, T, self.r, row.right)
-                    if dl is not None:
-                        dsrc["bs_mid_iv"] += 1
-                else:
-                    dsrc["provider"] += 1
-                if dl is not None:
-                    deltas[(row.right, k)] = float(dl)
+                pd_r = pdelta.loc[sub.index].to_numpy(float)
+                k = sub.strike.to_numpy(float)
+                miss = np.isnan(pd_r)
+                dl = pd_r.copy()
+                if miss.any():
+                    mid = 0.5 * (sub.bid + sub.ask).to_numpy(float)
+                    iv = bs.implied_vol(mid[miss], spot, k[miss], T, self.r, r)
+                    dl[miss] = bs.delta(spot, k[miss], T, self.r, iv, r)
+                    dsrc["bs_mid_iv"] += int((~np.isnan(dl[miss])).sum())
+                dsrc["provider"] += int((~miss).sum())
+                for kk, v in zip(k, dl):
+                    if v == v:
+                        deltas[(r, round(float(kk), 4))] = float(v)
         else:
             need = self.strat.needed_strikes(strikes, cfg, spot, vix, width)
             for right, ks in need.items():
@@ -834,7 +845,7 @@ def run_lab(provider: Provider, cfg: Config, events=None, events_note: str = "",
         raise ValueError(f"unknown strategy {cfg.strategy}; choose from {sorted(STRATEGIES)}")
     if cfg.action not in mgmt.ACTIONS:
         raise ValueError(f"unknown action {cfg.action}")
-    if cfg.event_buffer and events is None:
+    if cfg.event_buffer and events is None and not cfg.force_entry:
         raise ValueError("event_buffer is on but no events were supplied")
     return _Lab(provider, cfg, events, events_note, tinfo, max_entries, window).run()
 

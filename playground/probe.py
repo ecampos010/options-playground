@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import pandas as pd
 
 from . import rules
 from .config import build_config
@@ -36,9 +35,10 @@ def _q(vals, p):
 
 class Probe:
     def __init__(self, client: ThetaClient, today: date | None = None, out_dir="results", burst=24,
-                 data_dir="data", spot_fn=None):
+                 data_dir="data", spot_fn=None, tickers=("SPY",)):
         self.c, self.today, self.out = client, today or date.today(), Path(out_dir)
         self.burst, self.data_dir, self.spot_fn = burst, data_dir, spot_fn
+        self.tickers = tuple(tickers)
         self.checks, self.measured, self.samples = [], {}, []
         self.dte = build_config("green").dte
 
@@ -59,36 +59,42 @@ class Probe:
         except Exception as e:
             self.rec(section, name, False, f"EXCEPTION {type(e).__name__}: {e}")
 
-    def spot_for(self, d: date):
-        """SPY close for d (stock history is 403 on Standard): custom fn -> cached daily -> yfinance."""
-        if self.spot_fn:
+    def spot_for(self, d: date, ticker: str = "SPY"):
+        """Underlying close for d (stock history is 403 on Standard): test hook -> Alpaca daily cache -> cached
+        daily -> yfinance."""
+        if self.spot_fn and ticker == "SPY":
             return self.spot_fn(d)
         from .cache import DataCache
-        df = DataCache(self.data_dir).load_daily("SPY")
-        if df is not None and d in df.index:
-            return float(df.loc[d, "close"])
+        from .spot import SpotStore
+        for df in (SpotStore(Path(self.data_dir) / "spot").load_daily(ticker, "raw"),
+                   DataCache(self.data_dir).load_daily(ticker)):
+            if df is not None and len(df):
+                ix = df.index[df.index <= d]
+                if len(ix) and (d - ix[-1]).days <= 5:
+                    return float(df.loc[ix[-1], "close"])
         from .dailydata import spy_from_yfinance
-        y = spy_from_yfinance(d - timedelta(days=3), d)
+        y = spy_from_yfinance(d - timedelta(days=3), d, ticker)
         if y is not None and len(y):
             return float(y["close"].iloc[-1])
         return None
 
     # ------------------------------------------------------------------ (a)
     def check_a(self):
-        sec = "a: expired SPY contracts listable (candidates confirmed by trial quote)"
-        exps, r = self.c.expirations("SPY")
-        self.rec(sec, "list expirations", r.ok and bool(exps), f"{len(exps)} expirations"
-                 + (f", {exps[0]}..{exps[-1]}" if exps else ""), r)
         cfg = build_config("green")
-        for y in YEARS:
-            self.safe(sec, f"{y}y", lambda y=y: self._one_year(sec, y, exps, cfg))
+        for tk in self.tickers:
+            sec = f"a: expired {tk} contracts listable (candidates confirmed by trial quote)"
+            exps, r = self.c.expirations(tk)
+            self.rec(sec, f"{tk} list expirations", r.ok and bool(exps), f"{len(exps)} expirations"
+                     + (f", {exps[0]}..{exps[-1]}" if exps else ""), r)
+            for y in YEARS:
+                self.safe(sec, f"{tk} {y}y", lambda y=y, tk=tk, sec=sec, exps=exps: self._one_year(sec, y, exps, cfg, tk))
 
-    def _one_year(self, sec, y, exps, cfg):
+    def _one_year(self, sec, y, exps, cfg, tk="SPY"):
         try:
             target = _wk(self.today.replace(year=self.today.year - y))
         except ValueError:
             target = _wk(self.today - timedelta(days=365 * y))
-        spot = self.spot_for(target)
+        spot = self.spot_for(target, tk)
         if spot is None:
             self.rec(sec, f"{y}y ago ({target})", False,
                      "no spot source (stock history is 403 on Standard): run `download --daily-only` or pip install yfinance")
@@ -100,14 +106,14 @@ class Probe:
         tgt_put = spot * 0.954
         confirmed, tried = None, 0
         for e in ranked[:8]:
-            ks, r2 = self.c.strikes(e, "SPY")
+            ks, r2 = self.c.strikes(e, tk)
             ints = [k for k in ks if k == int(k)]
             if not ints:
                 self.rec(sec, f"{y}y {target} expiry {e} ({e:%a}) strikes", r2.ok, "no integer strikes in list", r2,
                          level="INFO")
                 continue
             k = min(ints, key=lambda x: abs(x - tgt_put))
-            df, r = self.c.option_quotes(e, "P", k, target, target, "1m", ENTRY_MIN, ENTRY_MIN + 1)
+            df, r = self.c.option_quotes(e, "P", k, target, target, "1m", ENTRY_MIN, ENTRY_MIN + 1, tk)
             tried += 1
             if r.no_data:
                 self.rec(sec, f"{y}y {target} trial expiry {e} ({e:%a}) P{k:g}", True,
@@ -115,15 +121,22 @@ class Probe:
                 continue
             if r.ok and len(df):
                 confirmed = (e, k, ks, ints)
-                self.rec(sec, f"{y}y ago ({target}) expiry {e} ({e:%a}) P{k:g}", True,
+                self.rec(sec, f"{tk} {y}y ago ({target}) expiry {e} ({e:%a}) P{k:g}", True,
                          f"confirmed after {tried} trial(s); {len(ks)} listed strikes", r)
+                near = sorted(x for x in ks if abs(x - spot) <= 0.05 * spot)
+                gaps = sorted({round(b - a, 4) for a, b in zip(near, near[1:])})
+                self.measured.setdefault("strike_increments", {}).setdefault(tk, {})[str(target.year)] = gaps
+                self.rec(sec, f"{tk} strike increments near the money in {target.year}", True,
+                         f"distinct gaps within +/-5% of spot: {gaps} (half-dollar strikes: "
+                         f"{'yes' if any(abs(g - round(g)) > 1e-9 for g in gaps) else 'no'}); listed strikes "
+                         f"{len(near)} in band", None, level="INFO")
                 break
             self.rec(sec, f"{y}y {target} trial expiry {e} P{k:g}", False, f"rows={len(df)}", r)
         if confirmed:
             e, k, ks, ints = confirmed
-            self.samples.append((y, target, e, k, spot, ints))
+            self.samples.append((y, target, e, k, spot, ints, tk))
         else:
-            self.rec(sec, f"{y}y ago ({target})", False, f"no listed expiry confirmed in {tried} trial(s)")
+            self.rec(sec, f"{tk} {y}y ago ({target})", False, f"no listed expiry confirmed in {tried} trial(s)")
 
     # ------------------------------------------------------------------ (b)
     def check_b(self):
@@ -131,7 +144,7 @@ class Probe:
         if not self.samples:
             self.rec(sec, "quote history", False, "skipped: (a) confirmed no contract to test")
             return
-        for y, target, e, k, spot, ints in self.samples[:5]:
+        for y, target, e, k, spot, ints, tk in [x for x in self.samples if x[6] == self.tickers[0]][:5]:
             for itv in ("1m", "30s", "1s"):    # only 1m is required; finer intervals are INFO
                 def one(itv=itv, y=y, target=target, e=e, k=k):
                     df, r = self.c.option_quotes(e, "P", k, target, target, itv, ENTRY_MIN, ENTRY_MIN + 2)
@@ -149,7 +162,7 @@ class Probe:
         if not self.samples:
             self.rec(sec, "band", False, "no confirmed contract from (a)")
             return
-        y, target, e, k0, spot, ints = self.samples[0]
+        y, target, e, k0, spot, ints, tk = self.samples[0]
         i = min(range(len(ints)), key=lambda j: abs(ints[j] - k0))
         band = ints[max(0, i - 20): i + 20]
         lat, nbytes, rows, nodata, bad = [], 0, 0, 0, []
@@ -182,7 +195,7 @@ class Probe:
         if not self.samples:
             self.rec(sec, "bulk", False, "no confirmed contract from (a)")
             return
-        y, target, e, k0, spot, ints = self.samples[0]
+        y, target, e, k0, spot, ints, tk = self.samples[0]
         df, r = self.c.option_quotes_bulk(e, target, "1m", ENTRY_MIN, ENTRY_MIN + 1)
         if r.no_data:
             self.rec(sec, f"bulk {e} {target}", False, "NO_DATA (HTTP 472) for the bulk form", r)
@@ -250,9 +263,41 @@ class Probe:
                      "spot source for 1m/5m/15m runs (only `--resolution eod` is self-contained)", level="INFO")
         self.measured["stock_history_denied"] = denied
 
+    # ------------------------------------------------------------------ (f) Greeks + per-ticker snapshot speed
+    def check_f(self):
+        sec = "f: Greeks fields and bulk chain snapshot per ticker (TODO-VERIFY endpoints)"
+        seen = set()
+        for y, target, e, k, spot, ints, tk in self.samples:
+            if tk in seen:
+                continue
+            seen.add(tk)
+            df, r = self.c.greeks_bulk(e, target, "1m", ENTRY_MIN, ENTRY_MIN + 1, tk, strike=k, right="P")
+            if r.denied or (not r.ok):
+                self.rec(sec, f"{tk} Greeks single contract {e} P{k:g}", False,
+                         f"UNAVAILABLE status={r.status} raw={r.error[:200]!r} -> engine will use Black-Scholes delta from mid IV", r)
+                self.measured.setdefault("greeks_fields", {})[tk] = None
+                continue
+            try:
+                cols = list(self.c.parse(r.text).columns) if not r.empty else []
+            except Exception:
+                cols = []
+            has = {c: (c in [x.lower() for x in cols]) for c in ("delta", "implied_vol", "underlying_price")}
+            self.measured.setdefault("greeks_fields", {})[tk] = has
+            self.rec(sec, f"{tk} Greeks single contract {e} P{k:g}", bool(len(df)),
+                     f"rows={len(df)} fields: delta={has['delta']} implied_vol={has['implied_vol']} "
+                     f"underlying_price={has['underlying_price']} columns={cols}", r)
+            b, rb = self.c.option_quotes_bulk(e, target, "1m", ENTRY_MIN, ENTRY_MIN + 1, tk)
+            if rb.ok and len(b):
+                self.rec(sec, f"{tk} bulk chain snapshot {e}", True,
+                         f"rows={len(b)} strikes={b.strike.nunique()} bytes={rb.nbytes} latency={rb.latency:.2f}s", rb)
+                self.measured.setdefault("bulk_snapshot_latency_s", {})[tk] = rb.latency
+            else:
+                self.rec(sec, f"{tk} bulk chain snapshot {e}", False,
+                         f"UNSUPPORTED/EMPTY status={rb.status} raw={rb.error[:200]!r}", rb)
+
     # ------------------------------------------------------------------
     def run(self) -> dict:
-        for fn in (self.check_a, self.check_b, self.check_c, self.check_c2, self.check_d, self.check_e):
+        for fn in (self.check_a, self.check_b, self.check_c, self.check_c2, self.check_d, self.check_e, self.check_f):
             self.safe(fn.__name__, fn.__name__, fn)
         return self.write()
 

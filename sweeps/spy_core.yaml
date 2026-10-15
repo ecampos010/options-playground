@@ -1,0 +1,13 @@
+# SPY core: Green baseline first, then delta x DTE x stop x exit grid (unit mode, monthly cadence to limit data).
+# 6 x 4 x 4 x 2 = 192 configurations + 1 baseline. The sweep prints the NUMBER tried and half-vs-half results.
+name: spy_core
+base: {ticker: SPY, strategy: iron_condor, profile: green, resolution: 15m, entry_cadence: monthly, fill: natural}
+runs:
+  - {}                                  # baseline = Green rules as shipped (vix-distance strikes, ~35 DTE, tp50, 2x stop, 21 DTE exit)
+grid:
+  delta: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+  dte: [30, 45, 60, 90]
+  stop: [1.5, 2, 3, none]
+  exit:
+    - {tp: 0.75, time_exit: 0}          # exit A
+    - {tp: 0.50, time_exit: 21}         # exit B
