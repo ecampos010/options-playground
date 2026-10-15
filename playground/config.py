@@ -77,7 +77,7 @@ class Config:
     overlay_pct: float = 0.0
     # ================= lab engine (multi-ticker / multi-strategy; the Green engine ignores these) =========
     ticker: str = "SPY"
-    strategy: str = "iron_condor"            # iron_condor|iron_butterfly|bull_put_spread|put_bwb|cash_secured_put|covered_call
+    strategy: str = "iron_condor"            # iron_condor|iron_butterfly|bull_put_spread|put_bwb|cash_secured_put|covered_call|long_put|put_debit_spread|long_strangle
     sizing: str = "equity-pct"               # equity-pct | fixed1 (unit mode)
     entry_cadence: str = "weekly"            # monthly | weekly | twice-weekly | daily
     dte_target: int | None = None            # 30|45|60|90 -> dte = [t-7, t, t+7]

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from . import CAVEAT, LEVEL_TAGS, START_EQUITY
+from . import playbooks as _pb
 from .montecarlo import CAVEAT_MC
 from .replay import max_drawdown
 
@@ -171,8 +172,9 @@ def _page(ctx, data, syn) -> str:
                      "not from market data. It only proves the machinery works.</div>")
     parts.append(f'<p class="muted small">Generated {e(meta["generated"])} from {e(meta["runs_desc"])}. Research software, not advice. '
                  f'Start equity $100,000; idle cash earns {meta["apy"] * 100:.1f}% APY; sizing = allocation x current equity split equally across tickers; '
-                 f'per-expiry cap {e(meta["expiry_cap"])}; circuit breaker {e(meta["cb"])}. Monte Carlo: {e(meta["mc_desc"])}. Delta source: {e(meta.get("delta_source", "unknown"))}.</p>')
-    parts.append('<nav class="toc"><a href="#explorer">Equity &amp; thermometer</a><a href="#ranking">Ranking</a><a href="#vix">VIX regimes</a>'
+                 f'per-expiry cap {e(meta["expiry_cap"])}; circuit breaker {e(meta["cb"])}. Monte Carlo: {e(meta["mc_desc"])}. Delta source: {e(meta.get("delta_source", "unknown"))}. '
+                 f'Open trades excluded (expiry after the last data date; never counted as wins or losses): {int(meta.get("open_excluded", 0))}.</p>')
+    parts.append('<nav class="toc"><a href="#explorer">Equity &amp; thermometer</a><a href="#ranking">Ranking</a><a href="#playbooks">Playbooks &amp; awards</a><a href="#vix">VIX regimes</a>'
                  '<a href="#ways">Ways to lose money</a><a href="#stress">Stress lab</a><a href="#mgmt">Management rules</a><a href="#method">Caveats</a>'
                  '<button id="btn-theme" type="button" aria-label="Toggle light/dark">Light / dark</button></nav>')
     parts.append(summary_tiles(meta, ctx["ok"], ctx["br"], ctx["df"]))
@@ -195,6 +197,8 @@ def _page(ctx, data, syn) -> str:
                  '<label>Zone<select id="f-zn"></select></label><label>Search<input id="f-q" type="search" placeholder="ticker, profile, text"></label></div>'
                  '<p class="small muted" id="rank-count"></p><div class="scroll"><table><thead id="rank-head"></thead><tbody id="rank-body"></tbody></table></div>'
                  '<p><button id="more" type="button">Show more</button></p>')
+    if ctx.get("playbooks"):
+        parts.append(_pb.render_html(ctx["playbooks"], e))
     # vix
     v = ctx["vix"]
     vr = []

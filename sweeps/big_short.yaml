@@ -1,0 +1,10 @@
+# Big Short Style: long-premium, defined-risk structures through the approximate stress windows (unit mode, forced entries).
+# Max loss = debit paid. Expect them to LOSE in calm windows and pay in crashes; judge them on the crash windows.
+name: big_short
+type: stress
+every_day: false
+base: {ticker: SPY, strategy: long_put, resolution: 15m, fill: natural}
+runs:
+  - {profile: green, strategy: long_put, delta: 0.30, dte: 45, stop: none}
+  - {profile: green, strategy: put_debit_spread, delta: 0.30, dte: 45, stop: none}
+  - {profile: green, strategy: long_strangle, delta: 0.16, dte: 45, stop: none}

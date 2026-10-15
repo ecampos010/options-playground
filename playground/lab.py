@@ -248,6 +248,7 @@ class _Lab:
         self.cb_until = -1
         self.next_id = 1
         self.delta_src = {"provider": 0, "bs_mid_iv": 0}
+        self.open_excluded: list[dict] = []
         self.spot_days: dict[str, int] = {}
         self.missing_spot_days: list[str] = []
         self.notes: list[str] = []
@@ -377,7 +378,15 @@ class _Lab:
             prev_day, prev_eq = d, self._equity()
             self.eq_rows.append({"date": d, "cash": round(self.cash, 2), "equity": round(prev_eq, 2),
                                  "n_open": len(self.pos)})
-        for pos in list(self.pos):               # leave nothing open at the end of data: mark out, reason 'other'
+        last_data = days[i1]
+        for pos in list(self.pos):
+            if is_open_at(pos.expiry, last_data):
+                # still open when the data ends: NOT a win or a loss. Excluded from trades/marks, reported in meta.
+                self.pos.remove(pos)
+                self.marks = [m for m in self.marks if m[0] != pos.id]
+                self.open_excluded.append({"entry_ts": str(pos.entry_ts), "expiry": str(pos.expiry), "strategy": pos.strat,
+                                           "ticker": self.cfg.ticker, "last_mark_pnl": round(pos.last_mark, 2)})
+                continue
             self._finish(pos, "other", pos.last_nat if pos.last_nat is not None else 0.0,
                          pd.Timestamp(prev_day) + pd.Timedelta(hours=16), prev_day,
                          pos.last_spot if pos.last_spot is not None else pos.entry_spot, settle=False, i_last=i1)
@@ -830,11 +839,19 @@ class _Lab:
             "delta_source": self.delta_src, "delta_source_tag": delta_source_tag(self.delta_src), "unit_mode": self.unit, "notes": self.notes,
             "events": self.events_note, "fill_model": cfg.fill, "fee_per_contract": cfg.fee_per_contract,
             "config_tag": config_tag(cfg), "level": cfg.level, "window": self.window,
-            "adjustments": self.adjust_log}
+            "adjustments": self.adjust_log,
+            "open_excluded": {"count": len(self.open_excluded), "last_data_date": str(d1),
+                              "note": "trades whose expiry is after the last data date; excluded from trades.csv, never counted as wins or losses",
+                              "trades": self.open_excluded}}
         eq = pd.DataFrame(self.eq_rows) if not self.unit else None
         sz = pd.DataFrame(self.sizing, columns=["trade_id", "contracts", "equity_at_entry"]) if not self.unit else None
         meta["data_range"] = [str(d0), str(d1)]
         return LabResult(cfg, self.rid, t, m, bl, meta, eq, sz, config_tag(cfg))
+
+
+def is_open_at(expiry, last_data_date) -> bool:
+    """A position is still open (unresolved) when its expiry is after the last date we have data for."""
+    return pd.Timestamp(expiry).normalize() > pd.Timestamp(last_data_date).normalize()
 
 
 def delta_source_tag(counts: dict) -> str:

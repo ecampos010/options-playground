@@ -40,6 +40,7 @@ def main(argv=None):
         p.add_argument("--bp-dd", type=float, default=0.5)
         p.add_argument("--baseline-tag", default=None)
         p.add_argument("--config-dir", default=None)
+        p.add_argument("--playbooks-json", default="results/playbooks.json", help="where to write the Playbooks and Awards JSON")
 
     r = sub.add_parser("report", help="build report/index.html and friends")
     r.add_argument("--runs", default="runs")
@@ -68,7 +69,7 @@ def main(argv=None):
         return ReportOptions(allocations=a.allocations, apy=a.apy, cb=a.cb, expiry_cap=(a.expiry_cap or None), paths=a.paths, block=a.block,
                              seed=a.seed, no_mc=a.no_mc, jobs=a.jobs, spy_csv=a.spy_csv, bp_strategy=a.bp_strategy,
                              bp_tickers=[t for t in a.bp_tickers.split(",") if t], bp_profile=a.bp_profile, bp_dd=a.bp_dd,
-                             baseline_tag=a.baseline_tag, config_dir=a.config_dir)
+                             baseline_tag=a.baseline_tag, config_dir=a.config_dir, playbooks_json=a.playbooks_json)
     if a.cmd == "report":
         run_report(a.runs, a.out, opts(a))
     elif a.cmd == "demo":
