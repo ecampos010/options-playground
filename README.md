@@ -24,7 +24,7 @@ python -m pytest -q                        # sanity (offline)
 
 python -m playground probe                 # -> results/probe_report.md (+ .json). Paste FAIL lines back.
 python -m playground download --daily-only # SPY daily (yfinance, else Theta) + VIX daily (Cboe CSV) -> data/
-cp templates/events.csv.template data/events.csv   # then fill REAL dates (see below)
+python scripts/fetch_context_data.py       # FOMC/CPI/PPI/NFP/ELECTION -> data/events.csv, fed funds -> data/rates.csv (needs internet)
 python -m playground plan --start-date 2016-10-01 --end-date 2026-09-30 --resolution 5m
 python -m playground download --start-date 2016-10-01 --end-date 2026-09-30 --resolution 5m \
         --threads 2 --max-rps 5 --cover-matrix       # resumable: stop (Ctrl-C) and re-run any time
@@ -47,6 +47,7 @@ Offline demo (no ThetaData needed): add `--provider synthetic` to `backtest`, `m
 | `backtest` | one run; prints <=40 lines; writes `results/<run_id>/{trades.csv,equity.csv,config.json,summary.md}` |
 | `matrix` | standard 8-run grid (+ `--fill-compare`) |
 | `ladder` | green + yellow_E1..E7 + red on the same data/seed/fill; `--split-sample`, `--equal-budget` (give everyone Green's budget to isolate the guardrail effect) |
+| `python -m reporting report` | portfolio report; now also cash interest from `data/rates.csv` (with / without interest and vs cash) and the month / drawdown "why" cards with a Red months table: see `reporting/README.md` |
 | `overlay`, `spike-study` | **reserved stubs** (see `playground/reserve.py`; the engine's Position = signed legs + `kind`, so a hedge leg can be added without a rewrite) |
 
 Every rule is a config default overridable by CLI flag: `--gate on|off --upside-guard on|off --event-buffer on|off
@@ -54,11 +55,24 @@ Every rule is a config default overridable by CLI flag: `--gate on|off --upside-
 --entry-sample first|random|every-30m --seed --start 100000 --apy --budget-pct --full-use --strike-mode vix|delta
 --short-delta --dte 30,35,45 --min-credit --expiry-cap-frac --resolution --profile ...` (`backtest --help`).
 
-## events.csv
+## events.csv and rates.csv (context data)
+
+```bash
+python scripts/fetch_context_data.py                    # 2016-2026 -> data/events.csv + data/rates.csv; run on the VPS (internet)
+python scripts/fetch_context_data.py --check            # re-validate the files already in data/ (no network)
+python scripts/fetch_context_data.py --html-dir saved/  # parse pages you saved in a browser if a site blocks scripts
+python scripts/fetch_context_data.py --allow 2025:CPI=11   # accept a genuine disruption, printed and never silent
+```
+Sources: federalreserve.gov FOMC calendars (decision day of each SCHEDULED meeting), the bls.gov monthly release-schedule pages
+(Consumer Price Index, Producer Price Index, Employment Situation = NFP), US Election Day from the statutory rule (Tuesday after the
+first Monday of November, even years) and the FRED public CSV for the daily effective fed funds rate (`--rate-series DFF|EFFR`, no key).
+It exits with code 2 and writes nothing if a check fails: about 8 FOMC (7-9) and exactly 12 CPI / PPI / NFP per year, no duplicates,
+sorted, dates parse, no weekend releases, rates without gaps over 7 days and not stale. EARNINGS rows already in the file are kept.
+The parsers were tested against saved fixtures only; if a page layout changed the error names the URL.
 
 `data/events.csv`, columns `date,event[,symbol]`; event in `FOMC, CPI, PPI, NFP, ELECTION, EARNINGS`
 (`symbol` only matters for EARNINGS). Lines starting with `#` are ignored. See `templates/events.csv.template`.
-**Fill it from official calendars; this repo never invents dates.** A missing file is a clear error (use
+`data/rates.csv` is `date,rate_pct` (percent, calendar-daily). **This repo never invents dates.** A missing file is a clear error (use
 `--event-buffer off` to run without it). With `--provider synthetic` and no file, a clearly-labelled SYNTHETIC
 event calendar is used.
 

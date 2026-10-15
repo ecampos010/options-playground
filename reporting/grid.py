@@ -4,7 +4,7 @@ from __future__ import annotations
 import itertools
 import re
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 
 import numpy as np
 import pandas as pd
@@ -12,6 +12,7 @@ import pandas as pd
 from . import ALLOCATIONS, LEVEL_TAGS, START_EQUITY, effective_level
 from . import montecarlo as mcm
 from . import thermo, verdicts
+from .cash import RateTable
 from .replay import ReplayConfig, build_variant, max_drawdown, monthly_stats, replay
 
 MIX = "all_strategies_equal"
@@ -67,6 +68,10 @@ def _one_group(args):
     if gcfg.mixes and len(strategies) > 1:
         sets.append((MIX, strategies))
     tcfg = gcfg.thermo_cfg or thermo.load_config()
+    s0 = gcfg.replay.start_equity
+    rt = gcfg.replay.rates or RateTable(None, gcfg.replay.apy)
+    cfg0 = dc_replace(gcfg.replay, apy=0.0, rates=None)             # the same replay with interest on idle cash switched OFF
+    cash_c = rt.cash_curve(days, s0)                                   # cash-only account (risk-free benchmark)
     for sname, slist in sets:
         sub = gtr[gtr["strategy"].isin(slist)]
         vd = build_variant(sub, gmarks, days)
@@ -80,7 +85,15 @@ def _one_group(args):
             delta = vd.trades.loc[mask, "short_put_delta"].median()
             for A in gcfg.allocations:
                 res = replay(vd, mask, A / 100.0, gcfg.replay)
+                res0 = replay(vd, mask, A / 100.0, cfg0)
                 m = dict(res.metrics)
+                m0 = res0.metrics
+                yrs = m["years"]
+                cash_final = float(cash_c[-1])
+                cash_cagr = (cash_final / s0) ** (1.0 / yrs) - 1.0
+                m.update(final_equity_noint=m0["final_equity"], cagr_noint=m0["cagr"], max_dd_noint=m0["max_dd"],
+                         interest_usd=m["final_equity"] - m0["final_equity"], cash_final=cash_final, cash_cagr=cash_cagr,
+                         excess_cagr=m["cagr"] - cash_cagr, beats_cash=bool((not m["broke"]) and m["final_equity"] > cash_final))
                 dd = max_drawdown(res.equity, gcfg.replay.start_equity)
                 ret, low, _, _ = monthly_stats(res.equity, vd.month_id, gcfg.replay.start_equity)
                 m["dd_trough_date"] = str(vd.days[int(dd.argmax())].date())
@@ -99,7 +112,8 @@ def _one_group(args):
                          typical_vix=(vixmode.iloc[0] if len(vixmode) else ""), short_delta=float(delta) if pd.notna(delta) else np.nan,
                          group=f"{profile}|{tag}|{sname}")
                 rows.append(m)
-                series[sid] = {"eq": res.equity.astype(np.float32), "days": vd.days, "gkey": f"{profile}|{tag}|{sname}"}
+                series[sid] = {"eq": res.equity.astype(np.float32), "eq0": res0.equity.astype(np.float32), "days": vd.days,
+                               "gkey": f"{profile}|{tag}|{sname}"}
     return rows, series
 
 
@@ -171,7 +185,11 @@ def write_parquet(out_dir, ids: list, series: dict, start_eq=START_EQUITY) -> in
     for sid in ids:
         s = series[sid]
         eq = s["eq"].astype(float)
-        pd.DataFrame({"date": s["days"], "equity": eq, "drawdown": max_drawdown(eq, start_eq)}).to_parquet(
+        cols = {"date": s["days"], "equity": eq}
+        if "eq0" in s:
+            cols["equity_no_interest"] = s["eq0"].astype(float)
+        cols["drawdown"] = max_drawdown(eq, start_eq)
+        pd.DataFrame(cols).to_parquet(
             d / f"{safe_name(sid)}.parquet", index=False, compression="zstd")
     return len(ids)
 

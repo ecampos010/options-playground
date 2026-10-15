@@ -9,7 +9,11 @@ Always `plan` first. `plan` writes nothing and prints, per ticker and per `--ent
 GB and wall-clock at 2 threads (Value tier) and 4 threads (Standard limit), using the latency measured by the last
 `probe`. Use `--max-gb` and `--max-hours` (per ticker hard stops) on every `download`.
 
-0. **Setup (day 1).** `probe` (all five tickers) -> paste FAIL lines; `spot` (Alpaca minute bars + coverage);
+0. **Setup (day 1).** `python scripts/fetch_context_data.py` (needs internet; takes a few minutes because it politely fetches ~130 BLS
+   month pages) -> `data/events.csv` (FOMC, CPI, PPI, NFP, ELECTION) and `data/rates.csv` (daily fed funds). It aborts with exit code 2 and
+   writes nothing if a sanity check fails; read the message (a genuine schedule disruption such as the Oct-Nov 2025 shutdown needs an explicit
+   `--allow 2025:CPI=11`). If a site blocks scripts, save the pages in a browser and use `--html-dir`. Re-validate any time with `--check`.
+   Then `probe` (all five tickers) -> paste FAIL lines; `spot` (Alpaca minute bars + coverage);
    `spot --validate massive,greeks,parity` -> read `results/spot_validation.md`; `download --daily-only` (SPY/VIX/VIX3M).
 1. **SPY baseline.** `plan --engine lab --tickers SPY --entry-cadences monthly,weekly`, then
    `download --engine lab --tickers SPY --entry-cadence weekly` (vix-distance strikes) and
@@ -31,7 +35,11 @@ GB and wall-clock at 2 threads (Value tier) and 4 threads (Standard limit), usin
    per era; widths are 0.7% of spot rounded to the listed increment. TLT pays monthly dividends: look at `exdiv_flag`.
 6. **Stress.** `stress` (or `sweep sweeps/stress.yaml`): forced entries in the approximate windows of
    `data/stress_windows.csv` (edit them; they are month-level, not event dates). Needs the cache to cover the windows.
-7. **Export before the purge:** `export-outputs` (derived logs only; never data/, cache/ or parquet), then
+7. **Reports with context.** `python -m reporting report --runs runs/ --out report/` reads `data/rates.csv` (idle cash then earns the real daily
+   fed funds rate and every scenario is compared with a cash-only account; if the file is missing the flat `--apy` is used and the report header
+   says so), `data/events.csv` and the SPY/VIX daily files in `data/underlying/` for the month and drawdown "why" cards and the Red months table.
+   No new vendor data is needed, so this can run after the purge.
+8. **Export before the purge:** `export-outputs` (derived logs only; never data/, cache/ or parquet), then
    `purge-vendor-data --yes` once the subscription ends.
 
 ## Over-fitting guard rails
