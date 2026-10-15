@@ -1,3 +1,4 @@
 # E2: allow entry 2 trading days before FOMC (hold through); only FOMC day itself stays blocked.
 tier: "yellow"
+level: 2
 event_buffer_overrides: {"FOMC": 0}

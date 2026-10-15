@@ -109,12 +109,14 @@ def band(strikes: list[float], center: float, n: int) -> list[float]:
     return s[max(0, i - n): i + n + 1]
 
 
-def entry_strikes(strikes: list[float], target: float, right: str, cfg: Config) -> tuple[list[float], list[float]]:
+def entry_strikes(strikes: list[float], target: float, right: str, cfg: Config,
+                  width: float | None = None) -> tuple[list[float], list[float]]:
     """(band of candidate short strikes, all strikes needed incl. the long wing) for one side."""
+    w = cfg.width if width is None else width
     nb = cfg.band_strikes if cfg.strike_rule["mode"] == "vix" else max(cfg.band_strikes, 20)
     bnd = band(strikes, target, nb)
-    lo = min(bnd) - cfg.width if right == "P" else min(bnd)
-    hi = max(bnd) if right == "P" else max(bnd) + cfg.width
+    lo = min(bnd) - w if right == "P" else min(bnd)
+    hi = max(bnd) if right == "P" else max(bnd) + w
     return bnd, [k for k in strikes if lo <= k <= hi]
 
 
@@ -122,6 +124,18 @@ def candidate_expiries(expiries: list[date], d: date, cfg: Config) -> list[date]
     lo, tgt, hi = cfg.dte
     c = [e for e in expiries if lo <= (e - d).days <= hi]
     return sorted(c, key=lambda e: (abs((e - d).days - tgt), e))[: cfg.entry_expiries]
+
+
+def is_monthly(e: date) -> bool:
+    return e.weekday() == 4 and 15 <= e.day <= 21
+
+
+def rank_expiries(expiries: list[date], d: date, cfg: Config) -> list[date]:
+    """All expiries in the DTE window, Fridays (monthlies on ties) first, then closest to target DTE.
+    Non-Fridays stay at the end as a fallback; the caller confirms each with a trial quote."""
+    lo, tgt, hi = cfg.dte
+    c = [e for e in expiries if lo <= (e - d).days <= hi]
+    return sorted(c, key=lambda e: (e.weekday() != 4, abs((e - d).days - tgt), not is_monthly(e), e))
 
 
 def delta_pick(strikes, mids, spot, T, r, right, target_abs_delta) -> float | None:

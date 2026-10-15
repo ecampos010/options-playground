@@ -9,10 +9,10 @@ import json
 from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
 
-TIER_BUDGET = {"green": 0.15, "yellow": 0.05, "red": 0.01}
+TIER_BUDGET = {"green": 0.15, "yellow": 0.05, "red": 0.01, "experiment": 0.05}
 PROFILE_DIR = Path(__file__).resolve().parent.parent / "profiles"
 # Keys excluded when counting "switches" that differ between profiles.
-META_KEYS = {"profile", "tier", "budget_pct"}
+META_KEYS = {"profile", "tier", "budget_pct", "level"}
 DICT_KEYS = {"strike_rule", "event_buffer_overrides", "event_release_times"}
 
 
@@ -20,6 +20,7 @@ DICT_KEYS = {"strike_rule", "event_buffer_overrides", "event_release_times"}
 class Config:
     profile: str = "green"
     tier: str = "green"
+    level: int = 1                           # 1 Green, 2 Yellow, 3 Red, 4 Experiment (metadata, logged)
     # --- account ---
     start_equity: float = 100_000.0
     apy: float = 0.036
@@ -74,6 +75,44 @@ class Config:
     end_date: str | None = None
     # --- hedge overlay (reserved, see reserve.py) ---
     overlay_pct: float = 0.0
+    # ================= lab engine (multi-ticker / multi-strategy; the Green engine ignores these) =========
+    ticker: str = "SPY"
+    strategy: str = "iron_condor"            # iron_condor|iron_butterfly|bull_put_spread|put_bwb|cash_secured_put|covered_call
+    sizing: str = "equity-pct"               # equity-pct | fixed1 (unit mode)
+    entry_cadence: str = "weekly"            # monthly | weekly | twice-weekly | daily
+    dte_target: int | None = None            # 30|45|60|90 -> dte = [t-7, t, t+7]
+    width_mode: str = "auto"                 # auto (tickers.yaml fixed else pct of spot) | pct | fixed
+    width_pct: float = 0.007
+    min_credit_pct: float = 0.10             # of width
+    fee_per_contract: float = 0.05           # USD per contract per leg per transaction
+    spot_source: str = "alpaca"              # alpaca | parity | daily
+    spot_fallback: str = "parity"            # parity | none (what to do on days the primary source lacks coverage)
+    force_entry: bool = False                # stress: ignore all entry filters
+    # strategy parameters
+    ifly_tp: float = 0.25
+    bwb_near_pct: float = 0.007
+    bwb_far_pct: float = 0.043
+    # management / protection
+    stop_dollar: float | None = None         # USD loss per contract
+    forced_close_dte: int | None = None      # None -> strategy default (iron fly: 2)
+    trigger: str | None = None               # None | distance | delta
+    trigger_value: float = 0.02
+    action: str = "none"                     # none|exit|roll_tested|roll_condor|roll_untested|close_tested_spread|hedge_put_call|hedge_shares
+    max_rolls: int = 2
+    roll_credit_only: bool = False
+    roll_to_pct: float = 0.01                # rolled short sits this far (of spot) from spot
+    hedge_delta: float = 0.25
+    hedge_expiry: str = "same"               # same | next
+    stock_slip_bps: float = 1.0
+    # entry filters (extra)
+    term_filter: bool = False                # block when VIX/VIX3M > 1.0
+    term_ratio_max: float = 1.0
+    post_spike_wait: int = 0
+    spike_pct: float = 0.20
+    min_ivr: float = 0.0
+    delta_cap_pct: float | None = None       # delta-dollars <= X% of capital at risk
+    scale_in: int = 1                        # 1 or 4 weekly tranches of 25%
+    close_before_exdiv: bool = False
 
     # ------------------------------------------------------------------
     def effective_budget(self) -> float:

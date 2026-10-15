@@ -107,18 +107,38 @@ def test_throttle_backoff_and_failures(world, tmp_path):
 
 def test_probe_fails_soft_and_writes_report(tmp_path):
     long_world = SyntheticProvider(start="2006-01-03", end="2016-09-30")
-    cl = ThetaClient("http://fake", max_rps=0, sleep=lambda s: None,
-                     session=FakeSession(long_world, fail_paths=("/v3/index/history/eod",)))
-    rep = Probe(cl, today=date(2016, 9, 30), out_dir=tmp_path, burst=10).run()
+    daily = long_world.get_underlying_daily()
+    cl = ThetaClient("http://fake", max_rps=0, sleep=lambda s: None, max_retries=1,
+                     session=FakeSession(long_world, only_fridays=True, deny_stock=True))
+    rep = Probe(cl, today=date(2016, 9, 30), out_dir=tmp_path, burst=10,
+                spot_fn=lambda d: float(daily.close.asof(d)) if d >= daily.index[0] else None).run()
     assert (tmp_path / "probe_report.md").exists() and (tmp_path / "probe_report.json").exists()
     secs = {c["section"][0] for c in rep["checks"]}
     assert {"a", "b", "c", "d", "e"} <= secs
-    failed = [c for c in rep["checks"] if not c["ok"]]
-    assert any("index eod" in c["name"] and c["status"] == 500 and c["raw_error"] for c in failed)
-    md = (tmp_path / "probe_report.md").read_text()
-    assert "UNVERIFIED" in md and "raw error" in md
+    # stock/index 403 are INFO, never FAIL
+    e_checks = [c for c in rep["checks"] if c["section"].startswith("e")]
+    assert e_checks and all(c["level"] == "INFO" for c in e_checks)
+    assert any("NOT PERMITTED" in c["detail"] for c in e_checks)
+    assert not [c for c in rep["checks"] if c["level"] == "FAIL" and c["section"].startswith("e")]
+    # corrected selection: confirmed contracts are Fridays
+    confirmed = [c for c in rep["checks"] if c["section"].startswith("a") and c["level"] == "PASS" and "(Fri)" in c["name"]]
+    assert confirmed
+    # bulk entry snapshot reported with rows/columns
+    bulk = [c for c in rep["checks"] if c["section"].startswith("c2")]
+    assert bulk and "columns=" in bulk[0]["detail"] and bulk[0]["level"] == "PASS"
     assert rep["measured"].get("option_quote_latency_p50_s") is not None
-    assert any(c["section"].startswith("b") and c["ok"] for c in rep["checks"])
+    assert rep["measured"]["stock_history_denied"] is True
+    assert "INFO" in (tmp_path / "probe_report.md").read_text()
+
+
+def test_probe_reports_exact_error_when_expirations_fail(tmp_path):
+    w = SyntheticProvider(start="2006-01-03", end="2016-09-30")
+    cl = ThetaClient("http://fake", max_rps=0, sleep=lambda s: None, max_retries=1,
+                     session=FakeSession(w, fail_paths=("/v3/option/list/expirations",)))
+    rep = Probe(cl, today=date(2016, 9, 30), out_dir=tmp_path, burst=4, spot_fn=lambda d: 200.0).run()
+    bad = [c for c in rep["checks"] if c["level"] == "FAIL"]
+    assert any(c["status"] == 500 and c["raw_error"] and c["endpoint"].endswith("expirations") for c in bad)
+    assert "raw error" in (tmp_path / "probe_report.md").read_text()
 
 
 def test_plan_prints_all_resolutions_and_writes_nothing(world, tmp_path):
@@ -129,7 +149,18 @@ def test_plan_prints_all_resolutions_and_writes_nothing(world, tmp_path):
     for res in ("1m", "5m", "15m", "eod"):
         assert res in out
     assert "wall@2thr" in out and "wall@4thr" in out and "NAIVE" in out and "ASSUMED" in out
+    assert "Standard allows 4 concurrent" in out and "Value 2" in out
     assert list(tmp_path.iterdir()) == []
+    (tmp_path / "probe_report.json").write_text(json.dumps({"measured": {"option_quote_latency_p50_s": 0.2}}))
+    out2 = make_plan(cfg, daily, vix, evx, results_dir=tmp_path, data_dir=tmp_path, max_rps=100)
+    assert "measured by last probe" in out2 and "WARNING" not in out2
+
+    def hours(txt, col):
+        row = next(l for l in txt.splitlines() if l.startswith("5m") and "on-demand" in l)
+        return float(row.split("|")[col].strip().rstrip("h"))
+    assert hours(out2, 6) < hours(out2, 5)                       # 4 threads faster than 2 ...
+    out3 = make_plan(cfg, daily, vix, evx, results_dir=tmp_path, data_dir=tmp_path, concurrency_limit=2, max_rps=100)
+    assert hours(out3, 6) == hours(out3, 5)                      # ... unless the plan caps at 2 concurrent
 
 
 def test_candidate_days_is_superset_of_engine_entries(world):

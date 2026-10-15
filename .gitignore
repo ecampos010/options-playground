@@ -1,5 +1,10 @@
+data/*
+!data/stress_windows.csv
+exports/
+runs/
+reports/
+purge_log.md
 .env
-data/
 cache/
 results/
 __pycache__/

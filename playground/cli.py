@@ -46,8 +46,11 @@ def add_rule_flags(p: argparse.ArgumentParser):
     g.add_argument("--time-exit", dest="time_exit", type=int, default=S, help="exit at N DTE (0=off)")
     g.add_argument("--dte", default=S, help="min,target,max e.g. 30,35,45")
     g.add_argument("--entry-every", dest="entry_every", type=int, default=S)
-    g.add_argument("--strike-mode", choices=["vix", "delta"], default=S)
+    g.add_argument("--strike-mode", choices=["vix", "vix-distance", "delta"], default=S)
     g.add_argument("--short-delta", type=float, default=S)
+    g.add_argument("--delta", type=float, default=S, help="short-leg delta for BOTH sides (implies --strike-mode delta)")
+    g.add_argument("--put-delta", type=float, default=S)
+    g.add_argument("--call-delta", type=float, default=S)
     g.add_argument("--fill", choices=["natural", "mid", "haircut"], default=S)
     g.add_argument("--haircut", type=float, default=S)
     g.add_argument("--entry-window", default=S, help="HH:MM-HH:MM (default 09:45-15:30)")
@@ -74,7 +77,13 @@ def overrides_from(args, include_profile=False) -> dict:
     keys = {"budget_pct", "start_equity", "apy", "full_use", "min_credit", "expiry_cap", "expiry_cap_frac",
             "commission", "gate", "upside_guard", "upside_5d", "event_buffer", "cb_days", "tp", "stop_mult",
             "breach_exit", "time_exit", "entry_every", "fill", "haircut", "entry_window", "entry_sample",
-            "seed", "resolution", "start_date", "end_date"}
+            "seed", "resolution", "start_date", "end_date",
+            # lab engine
+            "ticker", "strategy", "sizing", "entry_cadence", "dte_target", "width_mode", "width_pct", "min_credit_pct",
+            "fee_per_contract", "spot_source", "spot_fallback", "ifly_tp", "stop_dollar", "forced_close_dte", "trigger",
+            "trigger_value", "action", "max_rolls", "roll_credit_only", "roll_to_pct", "hedge_delta", "hedge_expiry",
+            "stock_slip_bps", "term_filter", "post_spike_wait", "spike_pct", "min_ivr", "delta_cap_pct", "scale_in",
+            "close_before_exdiv", "bwb_near_pct", "bwb_far_pct", "force_entry"}
     ov = {k: v for k, v in vars(args).items() if k in keys}
     if "stop_mult" in ov:
         ov["stop_mult"] = None if str(ov["stop_mult"]).lower() in ("off", "none", "0") else float(ov["stop_mult"])
@@ -85,9 +94,15 @@ def overrides_from(args, include_profile=False) -> dict:
             raise SystemExit("--dte needs min,target,max")
     sr = {}
     if "strike_mode" in a:
-        sr["mode"] = a["strike_mode"]
+        sr["mode"] = "vix" if a["strike_mode"] in ("vix", "vix-distance") else a["strike_mode"]
     if "short_delta" in a:
         sr["put_delta"] = sr["call_delta"] = a["short_delta"]
+    if "delta" in a:
+        sr["mode"], sr["put_delta"], sr["call_delta"] = "delta", a["delta"], a["delta"]
+    if "put_delta" in a:
+        sr["mode"], sr["put_delta"] = "delta", a["put_delta"]
+    if "call_delta" in a:
+        sr["mode"], sr["call_delta"] = "delta", a["call_delta"]
     if sr:
         ov["strike_rule"] = sr
     for item in (a.get("red_ignore") or "").split(","):
@@ -168,9 +183,11 @@ def _client(args):
 def cmd_probe(args):
     from .probe import Probe
     c = _client(args)
-    rep = Probe(c, out_dir=args.results_dir).run()
-    bad = [x for x in rep["checks"] if not x["ok"]]
-    print(f"probe: {len(rep['checks']) - len(bad)} passed, {len(bad)} failed -> {args.results_dir}/probe_report.md")
+    rep = Probe(c, out_dir=args.results_dir, data_dir=args.data_dir,
+                tickers=[t.strip().upper() for t in args.tickers.split(",") if t.strip()]).run()
+    bad = [x for x in rep["checks"] if x["level"] == "FAIL"]
+    info = sum(x["level"] == "INFO" for x in rep["checks"])
+    print(f"probe: {len(rep['checks']) - len(bad) - info} passed, {len(bad)} failed, {info} info -> {args.results_dir}/probe_report.md")
     for x in bad:
         print(f"FAIL [{x['section']}] {x['name']}: {x['detail']} | {x['endpoint']} {x['params']} "
               f"status={x['status']} raw={x['raw_error'][:300]!r}")
@@ -179,6 +196,9 @@ def cmd_probe(args):
 
 
 def cmd_plan(args):
+    if getattr(args, "engine", "green") == "lab":
+        from .cli_lab import cmd_plan_lab
+        return cmd_plan_lab(args)
     from .planner import make_plan
     cfg = make_cfg(args)
     prov = make_provider(args, cfg)
@@ -186,11 +206,14 @@ def cmd_plan(args):
     daily, vix = prov.get_underlying_daily(), prov.get_vix_daily()
     evx = EventIndex(ev, list(daily.index)) if ev is not None else None
     print(make_plan(cfg, daily, vix, evx, threads=(2, 4), max_rps=args.max_rps, entry_fetch=args.entry_fetch,
-                    chunk_days=args.chunk_days, results_dir=args.results_dir, data_dir=args.data_dir,
+                    chunk_days=args.chunk_days, concurrency_limit=args.concurrency_limit, results_dir=args.results_dir, data_dir=args.data_dir,
                     attempt_frac=args.attempt_frac, trades_per_year=args.trades_per_year))
 
 
 def cmd_download(args):
+    if getattr(args, "engine", "green") == "lab":
+        from .cli_lab import cmd_download_lab
+        return cmd_download_lab(args)
     from .cache import DataCache
     from .dailydata import ensure_daily
     from .downloader import Fetcher, stage_a, write_manifest
@@ -220,6 +243,8 @@ def cmd_download(args):
         info = {"spy_source": "fake", "vix_source": "fake"}
     else:
         info = ensure_daily(cache, client, start_data, end, log)
+        from .dailydata import ensure_vol_indices
+        info["vol_indices"] = ensure_vol_indices(cache, log)
     log("daily data:", info)
     tmp = ThetaProvider(cache)
     try:
@@ -229,7 +254,9 @@ def cmd_download(args):
         return 2
     if args.daily_only:
         return 0
-    fetcher = Fetcher(client, cache, list(daily.index), threads=args.threads, chunk_days=args.chunk_days,
+    if args.threads > args.concurrency_limit:
+        log(f"--threads {args.threads} exceeds the {args.concurrency_limit}-concurrent-request limit; clamping")
+    fetcher = Fetcher(client, cache, list(daily.index), threads=min(args.threads, args.concurrency_limit), chunk_days=args.chunk_days,
                       entry_fetch=args.entry_fetch, log=log)
     prov = ThetaProvider(cache, fetcher)
     cfg = apply_overrides(cfg, {"start_date": cfg.start_date or str(start), "end_date": cfg.end_date or str(end)})
@@ -280,20 +307,27 @@ def build_parser() -> argparse.ArgumentParser:
     p = sp.add_parser("probe", help="check what the local Theta Terminal provides (writes results/probe_report.md)")
     add_data_flags(p)
     p.add_argument("--fake", action="store_true", help="use the offline simulator (tests the plumbing only)")
+    p.add_argument("--tickers", default="SPY,QQQ,IWM,GLD,TLT")
     p.set_defaults(fn=cmd_probe)
 
+    from .cli_lab import add_lab_flags
     p = sp.add_parser("plan", help="dry-run estimate of download size/time (writes nothing to data/)")
-    add_rule_flags(p); add_data_flags(p)
+    add_rule_flags(p); add_data_flags(p); add_lab_flags(p)
     p.add_argument("--max-rps", type=float, default=5.0)
     p.add_argument("--entry-fetch", choices=["per-strike", "bulk"], default="per-strike")
     p.add_argument("--chunk-days", type=int, default=10)
+    p.add_argument("--concurrency-limit", type=int, default=4, help="Standard 4, Value 2")
     p.add_argument("--attempt-frac", type=float, default=0.35)
     p.add_argument("--trades-per-year", type=float, default=30)
+    p.add_argument("--engine", choices=["green", "lab"], default="green", help="lab: per-ticker/per-cadence plan")
+    p.add_argument("--tickers", default="SPY,QQQ,IWM,GLD,TLT")
+    p.add_argument("--entry-cadences", default="monthly,weekly,twice-weekly")
     p.set_defaults(fn=cmd_plan)
 
     p = sp.add_parser("download", help="resumable two-stage downloader into data/")
-    add_rule_flags(p); add_data_flags(p)
+    add_rule_flags(p); add_data_flags(p); add_lab_flags(p)
     p.add_argument("--threads", type=int, default=2)
+    p.add_argument("--concurrency-limit", type=int, default=4, help="Standard 4, Value 2")
     p.add_argument("--max-rps", type=float, default=5.0)
     p.add_argument("--entry-fetch", choices=["per-strike", "bulk"], default="per-strike")
     p.add_argument("--chunk-days", type=int, default=10)
@@ -303,6 +337,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cover-matrix", action="store_true", help="fetch what all 8 matrix variants need")
     p.add_argument("--limit-days", type=int, default=None)
     p.add_argument("--fake", action="store_true", help="offline simulator instead of a Theta Terminal")
+    p.add_argument("--engine", choices=["green", "lab"], default="green")
+    p.add_argument("--tickers", default="SPY")
+    p.add_argument("--max-gb", type=float, default=None, help="hard stop per ticker (GB on disk)")
+    p.add_argument("--max-hours", type=float, default=None, help="hard stop per ticker (wall-clock hours)")
     p.set_defaults(fn=cmd_download)
 
     p = sp.add_parser("backtest", help="run one backtest; compact summary + results/<run_id>/")
@@ -321,6 +359,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--split-sample", action="store_true", help="first half vs second half")
     p.set_defaults(fn=cmd_ladder)
 
+    from .cli_lab import register
+    register(sp)
     for name in ("overlay", "spike-study"):
         p = sp.add_parser(name, help="RESERVED - not built")
         p.set_defaults(fn=cmd_stub)

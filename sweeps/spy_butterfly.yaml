@@ -1,0 +1,10 @@
+# Iron butterfly (TP 25/50, forced close by 2 DTE) plus the other defined-risk twins.
+name: spy_butterfly
+base: {ticker: SPY, profile: green, resolution: 15m, entry_cadence: monthly, fill: natural}
+runs:
+  - {strategy: iron_condor}              # baseline: Green condor
+grid:
+  strategy: [iron_butterfly]
+  ifly_tp: [0.25, 0.50]
+  stop: [1.5, 2, 3, none]
+  dte: [30, 45]

@@ -1,3 +1,4 @@
 # E7: no stop (take-profit only) instead of the 2x stop.
 tier: "yellow"
+level: 2
 stop_mult: null

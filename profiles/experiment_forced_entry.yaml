@@ -1,0 +1,12 @@
+# Level 4 experiment: all guardrails off and entries forced every trading day on CPI/FOMC/spike days.
+tier: "experiment"
+level: 4
+gate: false
+upside_guard: false
+event_buffer: false
+cb_days: 0
+earnings_filter: false
+term_filter: false
+entry_every: 1
+entry_cadence: "daily"
+force_entry: true

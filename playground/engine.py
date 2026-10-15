@@ -156,7 +156,7 @@ class _Run:
         if budget - open_total < rules.MIN_UNIT_RISK:
             return "size"
         try:
-            exps = rules.candidate_expiries(self.p.list_expiries(d), d, cfg)
+            exps = self.p.entry_expiries(d, cfg, mins[b], spot, vix)
         except MissingData:
             return "nodata"
         reason = "noexpiry"

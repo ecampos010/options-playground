@@ -13,7 +13,8 @@ MATRIX_GUARDS = [
 ]
 MATRIX_EXITS = [("A tp75 noTime", dict(tp=0.75, time_exit=0)), ("B tp50+21DTE", dict(tp=0.50, time_exit=21))]
 NA_PROFILES = {"yellow_E5": "N/A for SPY", "yellow_E6": "N/A single-underlying"}
-LADDER_PROFILES = ["green"] + [f"yellow_E{i}" for i in range(1, 8)] + ["red"]
+LADDER_PROFILES = ["green"] + [f"yellow_E{i}" for i in range(1, 8)] + ["red"] + [
+    "experiment_all_off", "experiment_no_stop", "experiment_high_delta", "experiment_forced_entry"]
 
 
 def matrix_configs(base: Config):
@@ -68,14 +69,14 @@ def run_ladder(provider, overrides: dict, events, note: str, equal_budget: bool 
                 flag = "TOO FEW TRADES - not evidence"
             elif name in NA_PROFILES:
                 flag = NA_PROFILES[name]
-            rows.append([name, m["trades"], f"{m['win']:.0%}" if m["trades"] else "-",
+            rows.append([name, cfg.level, m["trades"], f"{m['win']:.0%}" if m["trades"] else "-",
                          f"{m['avg_credit']:.2f}" if m["trades"] else "-", f"{m['final']:,.0f}",
                          f"{m['cagr']:.1%}", f"{m['maxdd']:.1%}",
                          "(ref)" if name == "green" else f"{diff:+,.0f}", flag])
         out.append(f"LADDER [{label} {a}..{b}] | data={provider.name} | fill={base.fill} | seed={base.seed} | "
                    f"entry={base.entry_window}/{base.entry_sample} | res={base.resolution} | events={note}"
                    f"{' | equal-budget' if equal_budget else ' | tier budgets 15/5/1%'}\n"
-                   + table(rows, ["profile", "trades", "win", "avg credit", "final equity", "CAGR", "max DD",
+                   + table(rows, ["profile", "level", "trades", "win", "avg credit", "final equity", "CAGR", "max DD",
                                   "vs green", "flag"]))
         if provider.uses_real_data:
             out.append(f"Real-quote evidence covers {years:.0f} years; the project's promotion rule asks for 20+ "

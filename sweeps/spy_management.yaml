@@ -1,0 +1,19 @@
+# Management grid on the top few SPY configs. REPLACE the `config` bundles with the best 2-3 from spy_core.
+# 3 configs x 6 trigger specs x 8 actions = 144 + baseline.
+name: spy_management
+base: {ticker: SPY, strategy: iron_condor, profile: green, resolution: 15m, entry_cadence: monthly, fill: natural, max_rolls: 2}
+runs:
+  - {delta: 0.16, dte: 45}
+grid:
+  config:
+    - {strike_rule: {mode: delta, put_delta: 0.16, call_delta: 0.16}, dte_target: 45, stop_mult: 2.0}
+    - {strike_rule: {mode: delta, put_delta: 0.10, call_delta: 0.10}, dte_target: 45, stop_mult: 2.0}
+    - {strike_rule: {mode: delta, put_delta: 0.20, call_delta: 0.20}, dte_target: 30, stop_mult: 3.0}
+  trg:
+    - {trigger: distance, trigger_value: 0.01}
+    - {trigger: distance, trigger_value: 0.02}
+    - {trigger: distance, trigger_value: 0.03}
+    - {trigger: delta, trigger_value: 0.20}
+    - {trigger: delta, trigger_value: 0.25}
+    - {trigger: delta, trigger_value: 0.30}
+  action: [none, exit, roll_tested, roll_condor, roll_untested, close_tested_spread, hedge_put_call, hedge_shares]
