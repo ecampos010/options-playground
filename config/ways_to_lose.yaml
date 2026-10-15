@@ -1,0 +1,11 @@
+# Regexes (case-insensitive) that map your log names onto each "mistake". Edit to match TASK A's naming.
+base: {profile: "^green", strategy: "iron_condor", ticker: "SPY", allocation: 15, config_tag: "^(baseline|d16.*)$"}
+oversize_allocations: [50, 100]
+no_stop:        {profile: "^experiment_no_stop$", strategy: "iron_condor"}
+high_delta:     {config_tag: "delta(25|30|35)|^d(25|30|35)", strategy: "iron_condor"}
+all_guards_off: {profile: "^experiment_all_off$", strategy: "iron_condor"}
+crash_forced:   {profile: "^stress_"}
+correlated:     {tickers: ["SPY", "QQQ", "IWM"]}
+roll_losers:    {config_tag: "roll", strategy: "iron_condor"}
+butterfly_no_stop: {profile: "^experiment_no_stop$", strategy: "iron_butterfly"}
+post_spike:     {config_tag: "wait(\\d+)d?", strategy: "iron_condor"}

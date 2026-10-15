@@ -1,0 +1,18 @@
+# Fixed thresholds for the plain-English verdicts. Fractions (0.15 = 15%).
+steady:
+  max_drawdown: 0.15        # drawdown below this ...
+  worst_month: -0.05        # ... worst calendar month no worse than this ...
+  worst_trade_pct: -0.03    # ... and worst trade no worse than this % of equity => "Steady"
+bumpy:
+  max_drawdown: 0.30        # below this => "Bumpy"
+rough:
+  max_drawdown: 0.50        # below this => "Rough"; at or above => "Severe"
+thin_trades: 30
+# Named windows used to say "Survived the 2020 window". The drawdown trough date picks the window.
+windows:
+  - {name: "2018 vol-shock window", start: "2018-01-26", end: "2018-04-30"}
+  - {name: "2020 window",           start: "2020-02-15", end: "2020-05-31"}
+  - {name: "2022 bear-market window", start: "2022-01-01", end: "2022-12-31"}
+  - {name: "2025 tariff window",    start: "2025-03-15", end: "2025-05-31"}
+ways_to_lose:
+  base_floor: 0.001         # base P(broke) is floored at 0.1% before taking the multiple
