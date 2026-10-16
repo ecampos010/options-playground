@@ -40,17 +40,9 @@ def fomc_calendar_html(years):
 
 
 def bls_month_html(y, m, skip=()):
-    d0 = dt.date(y, m, 1)
-    cpi = d0 + dt.timedelta(days=11)
-    while cpi.weekday() >= 5:
-        cpi += dt.timedelta(days=1)
-    ppi = cpi + dt.timedelta(days=1)
-    while ppi.weekday() >= 5:
-        ppi += dt.timedelta(days=1)
-    nfp = d0 + dt.timedelta(days=(4 - d0.weekday()) % 7)             # first Friday
-    rows = [(nfp, "Employment Situation"), (cpi, "Consumer Price Index"), (ppi, "Producer Price Index"),
-            (cpi, "Real Earnings"), (ppi, "Import and Export Prices"), (nfp, "State Employment and Unemployment"),
-            (nfp, "Employment Cost Index")]
+    rows = [(fx_release("NFP", y, m), "Employment Situation"), (fx_release("CPI", y, m), "Consumer Price Index"), (fx_release("PPI", y, m), "Producer Price Index"),
+            (fx_release("CPI", y, m), "Real Earnings"), (fx_release("PPI", y, m), "Import and Export Prices"), (fx_release("NFP", y, m), "State Employment and Unemployment"),
+            (fx_release("NFP", y, m), "Employment Cost Index")]
     rows = [r for r in rows if r[1] not in skip]
     return "<table>" + "".join(
         f"<tr><td>{d.strftime('%A')}, {MON[d.month - 1][:3]}. {d.day}, {d.year}</td><td>08:30 AM</td><td>{n}</td></tr>" for d, n in sorted(rows)) + "</table>"
@@ -67,21 +59,81 @@ def fred_csv(y0, y1, series="DFF", last=None, hole=None):
     return "\n".join(out) + "\n"
 
 
-def make_fetch(y0=2016, y1=2026, skip_month=None, fomc_years=None, **fred_kw):
-    pages = {F.FOMC_CAL_URL: fomc_calendar_html(fomc_years or range(y0, y1 + 1))}
-    for y in range(y0, y1 + 1):
-        for m in range(1, 13):
-            pages[F.BLS_MONTH_URL.format(year=y, month=m)] = bls_month_html(y, m, skip=("Consumer Price Index",) if skip_month == (y, m) else ())
-    pages[F.FRED_URL.format(series="DFF", start=f"{y0}-01-01", end=f"{y1}-12-31")] = fred_csv(y0, y1, **fred_kw)
 
-    def fetch(url):
-        if url in pages:
-            return pages[url]
-        raise F.FetchError(f"404 {url}")
-    return fetch
+def fx_release(event, y, m):
+    """Fixture release date of the <event> published in month (y, m) - a weekday chosen by rule, NOT a real BLS date."""
+    d0 = dt.date(y, m, 1)
+    d = {"NFP": d0 + dt.timedelta(days=(4 - d0.weekday()) % 7), "CPI": d0 + dt.timedelta(days=11), "PPI": d0 + dt.timedelta(days=12)}[event]
+    while d.weekday() >= 5:
+        d += dt.timedelta(days=1)
+    return d
+
+
+def fx_dates(event, y, skip_month=None):
+    return [fx_release(event, y, m) for m in range(1, 13) if skip_month != m]
+
+
+def archive_html(event, years, skip=()):
+    slug = F.BLS_SLUG[event]
+    links = "".join(f'<li><a href="/news.release/archives/{slug}_{d:%m%d%Y}.htm">{MON[d.month - 1][:3]} {d.year}</a> '
+                    f'<a href="/news.release/archives/{slug}_{d:%m%d%Y}.pdf">PDF</a></li>'
+                    for y in years for d in fx_dates(event, y) if (event, d.year, d.month) not in skip)
+    return f"<html><body><ul>{links}</ul><a href='/news.release/archives/other_01012020.htm'>x</a><a href='/news.release/archives/cpi_13452020.htm'>bad</a></body></html>"
+
+
+def schedule_html(event, years):
+    rows = "".join(f"<tr><td>{MON[(d.month - 2) % 12][:3]} {d.year if d.month > 1 else d.year - 1}</td><td>{MON[d.month - 1][:3]}. {d.day:02d}, {d.year}</td><td>08:30 AM</td></tr>"
+                   for y in years for d in fx_dates(event, y))
+    return f"<table>{rows}</table>"
+
+
+def hist_html(y):
+    h = "".join(f"<h5>{MON[a.month - 1]} {a.day}-{b.day} Meeting - {y}</h5>" for a, b in fx_fomc(y))
+    return f"<html><body>{h}<h5>October 4 Meeting (unscheduled)</h5></body></html>"
+
+
+def fred_json(event, y0, y1, extra=()):
+    import json
+    ds = [d for y in range(y0, y1 + 1) for d in fx_dates(event, y)] + list(extra)
+    return json.dumps({"release_dates": [{"release_id": F.FRED_RELEASE_IDS[event], "date": d.isoformat()} for d in ds]})
+
+
+class World(dict):
+    """url -> page; anything else is a 404. Records requests."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.requested = []
+
+    def fetch(self, url):
+        self.requested.append(url)
+        if url in self:
+            return self[url]
+        raise F.FetchError(f"GET {url} failed: HTTP 404")
+
+
+def world(y0=2016, y1=2026, archive=True, sched_years=(), month_years=(), fomc_cal_years=None, skip=(), fred=False, rates=True, key="K3Y"):
+    w = World()
+    w[F.FOMC_CAL_URL] = fomc_calendar_html(fomc_cal_years or range(2020, y1 + 1))
+    for y in range(y0, min(y1, F.FOMC_HIST_LAST) + 1):
+        w[F.FOMC_HIST_URL.format(year=y)] = hist_html(y)
+    for ev, slug in F.BLS_SLUG.items():
+        if archive:
+            w[F.BLS_ARCHIVE_URL.format(slug=slug)] = archive_html(ev, range(y0, y1 + 1), skip)
+        if sched_years:
+            w[F.BLS_SCHED_URL.format(slug=slug)] = schedule_html(ev, sched_years)
+        if fred:
+            w[F.FRED_REL_URL.format(rid=F.FRED_RELEASE_IDS[ev], key=key)] = fred_json(ev, y0, y1)
+    for y in month_years:
+        for m in range(1, 13):
+            w[F.BLS_MONTH_URL.format(year=y, month=m)] = bls_month_html(y, m)
+    if rates:
+        w[F.FRED_URL.format(series="DFF", start=f"{y0}-01-01", end=f"{y1}-12-31")] = fred_csv(y0, y1)
+    return w
 
 
 TODAY = dt.date(2026, 12, 31)
+LOG = lambda *_: None  # noqa: E731
 
 
 # ------------------------------------------------------------------ parsers
@@ -120,38 +172,7 @@ def test_fred_parser_skips_missing_and_checks_header():
         F.parse_fred("foo,bar\n1,2\n", "DFF")
 
 
-# ------------------------------------------------------------------ full run + sanity checks
-def test_full_run_writes_both_files_with_expected_counts(tmp_path):
-    msgs = []
-    r = F.run(make_fetch(), tmp_path, 2016, 2026, "DFF", {}, TODAY, log=msgs.append)
-    ev = F.read_events_csv(tmp_path / "events.csv")
-    rt = F.read_rates_csv(tmp_path / "rates.csv")
-    assert ev == sorted(ev, key=lambda r: (r[0], r[1])) and len(set(ev)) == len(ev)
-    for y in range(2016, 2027):
-        for e, n in (("FOMC", 8), ("CPI", 12), ("PPI", 12), ("NFP", 12)):     
-            assert sum(1 for d, ee, _ in ev if ee == e and d.year == y) == n, (y, e)
-    assert [d for d, e, _ in ev if e == "ELECTION"][0] == dt.date(2016, 11, 8)
-    assert (tmp_path / "events.csv").read_text().startswith("# Generated")
-    assert rt[0][0] == dt.date(2016, 1, 1) and rt[-1][0] == dt.date(2026, 12, 31)
-    assert all(dt.date(2016, 1, 5) != d for d, _ in rt)                          # "." rows dropped
-    assert (tmp_path / "rates.csv").read_text().splitlines()[0] == "date,rate_pct"
-    assert r["events"] == len(ev) and any("wrote" in m for m in msgs)
-
-
-def test_cpi_count_failure_is_loud_and_writes_nothing(tmp_path):
-    fetch = make_fetch(skip_month=(2024, 5))
-    with pytest.raises(F.SanityError) as ei:
-        F.run(fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=lambda *_: None)
-    assert "2024: 11 CPI" in str(ei.value) and "--allow 2024:CPI=11" in str(ei.value)
-    assert not (tmp_path / "events.csv").exists() and not (tmp_path / "rates.csv").exists()
-
-
-def test_allow_override_is_explicit(tmp_path):
-    fetch = make_fetch(skip_month=(2025, 11))
-    r = F.run(fetch, tmp_path, 2016, 2026, "DFF", F.parse_allow(["2025:CPI=11"]), TODAY, log=lambda *_: None)
-    assert r["counts"][(2025, "CPI")] == 11
-
-
+# ------------------------------------------------------------------ checks used by --check
 def test_fomc_count_and_duplicates_and_sort_and_weekend_checks():
     d = dt.date
     base = [(d(2020, 1, 6), "FOMC", "")] * 8
@@ -182,47 +203,171 @@ def test_rates_checks_gap_stale_range_and_units():
         F.check_rates([ok[1], ok[0]] + ok[2:], 2020, d(2020, 2, 10))
 
 
-def test_rates_gap_in_download_fails_the_run(tmp_path):
-    fetch = make_fetch(hole=(dt.date(2019, 3, 1), dt.date(2019, 4, 1)))
-    with pytest.raises(F.SanityError, match="gaps longer"):
-        F.run(fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=lambda *_: None)
-    assert not (tmp_path / "events.csv").exists()
+
+# ------------------------------------------------------------------ new URL patterns
+def test_bls_archive_parser_reads_dates_from_link_names_and_filters_by_series():
+    html = archive_html("NFP", [2019, 2020])
+    got = F.parse_bls_archive(html, "empsit")
+    assert got == sorted(fx_dates("NFP", 2019) + fx_dates("NFP", 2020))
+    assert F.parse_bls_archive(html, "cpi") == [] and F.parse_bls_archive(archive_html("CPI", [2019]), "cpi") == sorted(fx_dates("CPI", 2019))   # 13452020 is not a date
+    assert F.parse_bls_archive('<a href="/news.release/archives/empsit_08072026.htm">x</a>', "empsit") == [dt.date(2026, 8, 7)]
 
 
-def test_layout_change_names_the_url(tmp_path):
-    fetch = make_fetch()
-    bad = F.BLS_MONTH_URL.format(year=2018, month=4)
+def test_bls_schedule_parser_pairs_reference_month_with_release_and_rejects_false_matches():
+    html = schedule_html("CPI", [2024]) + "<p>Page updated Oct 2024 Nov. 20, 2030 08:30 AM</p>"
+    assert F.parse_bls_schedule(html) == sorted(fx_dates("CPI", 2024))
+    row = "<tr><td>October 2025</td><td>Dec. 16, 2025</td><td>08:30 AM</td></tr>"
+    assert F.parse_bls_schedule(row) == [dt.date(2025, 12, 16)]
 
-    def f(url):
-        return "<html>nothing here</html>" if url == bad else fetch(url)
-    with pytest.raises(F.SanityError, match="2018/04_sched_list"):
-        F.collect_events(f, 2016, 2026)
+
+def test_fred_release_dates_parser_and_key_redaction():
+    assert F.parse_fred_release_dates(fred_json("CPI", 2020, 2020)) == sorted(fx_dates("CPI", 2020))
+    with pytest.raises(F.SanityError):
+        F.parse_fred_release_dates('{"error_code": 400}')
+    assert "SECRET" not in F.redact("GET https://api.stlouisfed.org/x?api_key=SECRET&file_type=json failed")
+
+
+def test_full_run_uses_historical_pages_only_through_2019_and_reports_sources(tmp_path):
+    w = world()
+    out = []
+    r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=out.append)
+    assert r["exit"] == 0
+    asked = [u for u in w.requested if "fomchistorical" in u]
+    assert asked == [F.FOMC_HIST_URL.format(year=y) for y in range(2016, 2020)]       # never 2020..2026
+    ev = F.read_events_csv(tmp_path / "events.csv")
+    for y in range(2016, 2027):
+        for e, n in (("FOMC", 8), ("CPI", 12), ("PPI", 12), ("NFP", 12)):
+            assert sum(1 for d, ee, _ in ev if ee == e and d.year == y) == n, (y, e)
+    text = "\n".join(out)
+    rows = [ln for ln in text.split("SOURCE USED")[0].splitlines() if ln.startswith(("FOMC", "CPI", "PPI", "NFP", "ELECTION"))]
+    assert "COVERAGE" in text and len(rows) == 5 and not any("MISSING" in ln or "!" in ln for ln in rows)
+    src = text.split("SOURCE USED")[1]
+    assert "fomchistorical2016.htm" in src and "fomccalendars.htm" in src and "bls archive" in src and "statutory rule" in src
+    assert (tmp_path / "rates.csv").exists()
+
+
+def test_partial_failure_writes_what_it_has_prints_missing_and_exits_nonzero(tmp_path):
+    w = world(archive=True)
+    del w[F.BLS_ARCHIVE_URL.format(slug="empsit")]                          # NFP has no source at all
+    del w[F.FOMC_HIST_URL.format(year=2017)]
+    out = []
+    r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=out.append)
+    text = "\n".join(out)
+    assert r["exit"] == 4 and "INCOMPLETE" in text and "NFP 2016" in text and "FOMC 2017" in text
+    nfp = next(ln for ln in text.splitlines() if ln.startswith("NFP"))
+    assert nfp.count("MISSING") == 11 and next(ln for ln in text.splitlines() if ln.startswith("FOMC")).count("MISSING") == 1
+    ev = F.read_events_csv(tmp_path / "events.csv")
+    assert {e for _, e, _ in ev} == {"FOMC", "CPI", "PPI", "ELECTION"}         # partial files written
+    assert (tmp_path / "rates.csv").exists() and "fetch failure" in text and "HTTP 404" in text
+
+
+def test_fred_api_key_fallback_fills_missing_years_and_never_prints_the_key(tmp_path):
+    w = world(fred=True)
+    del w[F.BLS_ARCHIVE_URL.format(slug="empsit")]
+    out = []
+    r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=out.append, fred_key="K3Y")
+    text = "\n".join(out)
+    assert r["exit"] == 0 and "FRED release dates (API key)" in text
+    assert "K3Y" not in text
+    assert any("release_id=50" in u for u in w.requested)
+    # without the key nothing calls the API
+    w2 = world(fred=True)
+    F.run(w2.fetch, tmp_path / "b", 2016, 2026, "DFF", {}, TODAY, log=LOG, fred_key=None)
+    assert not any("api.stlouisfed.org" in u for u in w2.requested)
+
+
+def test_fred_failure_message_hides_the_key(tmp_path):
+    w = world()
+    del w[F.BLS_ARCHIVE_URL.format(slug="cpi")]
+    out = []
+    def fetch(url):
+        try:
+            return w.fetch(url)
+        except F.FetchError as e:
+            raise F.FetchError(F.redact(str(e)))
+    F.run(fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=out.append, fred_key="TOPSECRET")
+    assert "TOPSECRET" not in "\n".join(out) and "api_key=***" in "\n".join(out)
+
+
+def test_schedule_and_monthly_list_sources_fill_years_the_archive_lacks(tmp_path):
+    w = world(archive=False, sched_years=[2024, 2025, 2026], month_years=[2021, 2022, 2023])
+    out = []
+    r = F.run(w.fetch, tmp_path, 2021, 2026, "DFF", {}, TODAY, log=out.append)
+    src = "\n".join(out).split("SOURCE USED")[1]
+    assert "bls schedule page" in src and "bls monthly lists" in src
+    assert r["counts"][(2022, "CPI")] == 12 and r["counts"][(2025, "NFP")] == 12
+
+
+def test_one_year_404_does_not_stop_the_other_years(tmp_path):
+    w = world(archive=False, month_years=range(2016, 2027))
+    del w[F.BLS_MONTH_URL.format(year=2018, month=4)]                        # one month page is gone
+    r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=LOG)
+    assert r["counts"][(2018, "CPI")] == 11 and r["counts"][(2019, "CPI")] == 12 and r["exit"] == 0
+    assert any("2018/04_sched_list" in f for f in r["failures"])
+    assert any("2018: 11 CPI" in x and "--allow 2018:CPI=11" in x for x in r["warnings"])
+
+
+def test_allow_silences_the_warning_and_strict_turns_anomalies_into_exit_2(tmp_path):
+    w = world(archive=True, skip={("CPI", 2025, 11)})
+    r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", F.parse_allow(["2025:CPI=11"]), TODAY, log=LOG, strict=True)
+    assert r["counts"][(2025, "CPI")] == 11 and r["warnings"] == [] and r["exit"] == 0
+    r2 = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=LOG, strict=True)
+    assert r2["exit"] == 2 and any("2025: 11 CPI" in x for x in r2["warnings"])
+    r3 = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=LOG)
+    assert r3["exit"] == 0
+
+
+def test_weekend_dates_from_a_source_are_dropped_not_written(tmp_path):
+    w = world()
+    slug = "cpi"
+    sat = dt.date(2019, 6, 1)
+    w[F.BLS_ARCHIVE_URL.format(slug=slug)] += f'<a href="archives/cpi_{sat:%m%d%Y}.htm">x</a>'
+    r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=LOG)
+    assert sat not in [d for d, e, _ in F.read_events_csv(tmp_path / "events.csv")] and r["counts"][(2019, "CPI")] == 12
+
+
+def test_previous_good_file_fills_a_hole_and_failed_rates_leave_the_old_file(tmp_path):
+    F.run(world().fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=LOG)
+    before_rates = (tmp_path / "rates.csv").read_text()
+    w = world(rates=False)
+    del w[F.BLS_ARCHIVE_URL.format(slug="empsit")]
+    out = []
+    r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=out.append)
+    assert r["exit"] == 0 and r["counts"][(2020, "NFP")] == 12                     # taken from the earlier file
+    assert "existing events.csv" in "\n".join(out) and "rates.csv NOT written" in "\n".join(out)
+    assert (tmp_path / "rates.csv").read_text() == before_rates
+
+
+def test_rate_gaps_are_flagged_but_still_written(tmp_path):
+    w = world()
+    w[F.FRED_URL.format(series="DFF", start="2016-01-01", end="2026-12-31")] = fred_csv(2016, 2026, hole=(dt.date(2019, 3, 1), dt.date(2019, 4, 1)))
+    out = []
+    r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=out.append)
+    assert (tmp_path / "rates.csv").exists() and any("gaps longer" in x for x in r["warnings"])
 
 
 def test_earnings_rows_survive_a_refresh_and_check_mode(tmp_path):
     (tmp_path / "events.csv").write_text("# mine\ndate,event,symbol\n2020-02-11,EARNINGS,AAPL\n")
-    F.run(make_fetch(), tmp_path, 2016, 2026, "DFF", {}, TODAY, log=lambda *_: None)
-    ev = F.read_events_csv(tmp_path / "events.csv")
-    assert (dt.date(2020, 2, 11), "EARNINGS", "AAPL") in ev
-    F.check_existing(tmp_path, 2016, 2026, {}, TODAY, log=lambda *_: None)
+    F.run(world().fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=LOG)
+    assert (dt.date(2020, 2, 11), "EARNINGS", "AAPL") in F.read_events_csv(tmp_path / "events.csv")
+    F.check_existing(tmp_path, 2016, 2026, {}, TODAY, log=LOG)
     (tmp_path / "events.csv").write_text("date,event,symbol\n2020-13-40,FOMC,\n")
     with pytest.raises(F.SanityError, match="does not parse"):
-        F.check_existing(tmp_path, 2016, 2026, {}, TODAY, log=lambda *_: None)
+        F.check_existing(tmp_path, 2016, 2026, {}, TODAY, log=LOG)
 
 
-def test_cli_exit_codes_and_dir_fetcher(tmp_path, capsys):
+def test_cli_html_dir_and_exit_codes(tmp_path, capsys, monkeypatch):
     saved = tmp_path / "pages"
     saved.mkdir()
-    fetch = make_fetch()
-    for y in range(2016, 2027):
-        for m in range(1, 13):
-            u = F.BLS_MONTH_URL.format(year=y, month=m)
-            (saved / (F.slug(u) + ".html")).write_text(fetch(u))
-    (saved / (F.slug(F.FOMC_CAL_URL) + ".html")).write_text(fetch(F.FOMC_CAL_URL))
-    u = F.FRED_URL.format(series="DFF", start="2016-01-01", end="2026-12-31")
-    (saved / (F.slug(u) + ".csv")).write_text(fetch(u))
+    w = world()
+    for url, page in w.items():
+        ext = ".csv" if "fredgraph" in url else ".html"
+        (saved / (F.slug(url) + ext)).write_text(page)
     out = tmp_path / "o"
-    rc = F.main(["--html-dir", str(saved), "--out", str(out)])       # today is the real clock: rates look stale -> loud failure, exit 2
-    assert rc in (0, 2)
-    rc2 = F.main(["--html-dir", str(tmp_path / "empty"), "--out", str(out)])
-    assert rc2 == 3 and "FETCH FAILED" in capsys.readouterr().err
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    rc = F.main(["--html-dir", str(saved), "--out", str(out)])
+    text = capsys.readouterr().out
+    assert rc in (0, 2) and "COVERAGE" in text and (out / "events.csv").exists()     # rates may be flagged stale against the real clock
+    rc2 = F.main(["--html-dir", str(tmp_path / "empty"), "--out", str(tmp_path / "o2")])
+    t2 = capsys.readouterr().out
+    assert rc2 == 4 and "MISSING" in t2 and "--html-dir" in t2                         # nothing found: loud, nonzero, no crash

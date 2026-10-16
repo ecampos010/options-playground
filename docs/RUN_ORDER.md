@@ -9,10 +9,10 @@ Always `plan` first. `plan` writes nothing and prints, per ticker and per `--ent
 GB and wall-clock at 2 threads (Value tier) and 4 threads (Standard limit), using the latency measured by the last
 `probe`. Use `--max-gb` and `--max-hours` (per ticker hard stops) on every `download`.
 
-0. **Setup (day 1).** `python scripts/fetch_context_data.py` (needs internet; takes a few minutes because it politely fetches ~130 BLS
-   month pages) -> `data/events.csv` (FOMC, CPI, PPI, NFP, ELECTION) and `data/rates.csv` (daily fed funds). It aborts with exit code 2 and
-   writes nothing if a sanity check fails; read the message (a genuine schedule disruption such as the Oct-Nov 2025 shutdown needs an explicit
-   `--allow 2025:CPI=11`). If a site blocks scripts, save the pages in a browser and use `--html-dir`. Re-validate any time with `--check`.
+0. **Setup (day 1).** `python scripts/fetch_context_data.py` (needs internet) -> `data/events.csv` and `data/rates.csv`. It writes whatever it could get and prints a
+   coverage table (MISSING cells = nothing found) plus the source used per event and year; exit 0 means FOMC, CPI and NFP exist for every year. For a hole, set
+   `FRED_API_KEY` in `.env` (`set -a; source .env; set +a`) to enable the FRED release-date fallback, or save the page in a browser and use `--html-dir`. A genuine
+   disruption such as the Oct-Nov 2025 shutdown: `--allow 2025:CPI=11`. Re-validate any time with `--check`.
    Then `probe` (all five tickers) -> paste FAIL lines; `spot` (Alpaca minute bars + coverage);
    `spot --validate massive,greeks,parity` -> read `results/spot_validation.md`; `download --daily-only` (SPY/VIX/VIX3M).
 1. **SPY baseline.** `plan --engine lab --tickers SPY --entry-cadences monthly,weekly`, then
