@@ -63,18 +63,22 @@ python scripts/fetch_context_data.py --check            # re-validate the files 
 python scripts/fetch_context_data.py --html-dir saved/  # parse pages you saved in a browser if a site blocks scripts
 python scripts/fetch_context_data.py --allow 2025:CPI=11   # accept a genuine disruption, printed and never silent
 ```
-Sources: federalreserve.gov FOMC calendars (decision day of each SCHEDULED meeting), the bls.gov monthly release-schedule pages
-(Consumer Price Index, Producer Price Index, Employment Situation = NFP), US Election Day from the statutory rule (Tuesday after the
-first Monday of November, even years) and the FRED public CSV for the daily effective fed funds rate (`--rate-series DFF|EFFR`, no key).
-It exits with code 2 and writes nothing if a check fails: about 8 FOMC (7-9) and exactly 12 CPI / PPI / NFP per year, no duplicates,
-sorted, dates parse, no weekend releases, rates without gaps over 7 days and not stale. EARNINGS rows already in the file are kept.
-The parsers were tested against saved fixtures only; if a page layout changed the error names the URL.
+Sources, in the order tried: **FOMC** federalreserve.gov `fomccalendars.htm` plus `fomchistorical<year>.htm` for 2016-2020 (unscheduled / emergency meetings such as March 2020 are included as FOMC rows; the ~8 check counts scheduled ones; notation votes are skipped); **CPI / PPI / NFP**
+(Employment Situation) bls.gov archived releases `bls/news-release/<cpi|ppi|empsit>.htm` (link names embed the date), then the schedule page
+`schedule/news_release/<slug>.htm`, then the monthly lists `schedule/<year>/<MM>_sched_list.htm` (recent years only); **fallback** FRED `fred/release/dates`
+(releases 10 CPI, 46 PPI, 50 Employment Situation) when `FRED_API_KEY` is in your environment (`set -a; source .env; set +a`; never printed or committed);
+**ELECTION** from the statutory rule; **rates** the FRED public CSV (`--rate-series DFF|EFFR`, no key).
+It never aborts on one bad source: it writes what it found (a previous good file fills holes), prints a coverage table (event x year: count or MISSING), which
+source each event/years used and the non-fatal fetch failures. Exit code 0 only if FOMC, CPI and NFP exist for every year, else 4 (partial files still written);
+count anomalies (not ~8 FOMC / 12 CPI/PPI/NFP) print as WARNING, and `--strict` turns them into exit 2. Weekend dates are dropped as parse errors.
+The URL patterns were taken from web search results because the cloud sandbox cannot reach the sites; the parsers are tested on saved fixtures only.
 
 `data/events.csv`, columns `date,event[,symbol]`; event in `FOMC, CPI, PPI, NFP, ELECTION, EARNINGS`
 (`symbol` only matters for EARNINGS). Lines starting with `#` are ignored. See `templates/events.csv.template`.
 `data/rates.csv` is `date,rate_pct` (percent, calendar-daily). **This repo never invents dates.** A missing file is a clear error (use
-`--event-buffer off` to run without it). With `--provider synthetic` and no file, a clearly-labelled SYNTHETIC
-event calendar is used.
+`--event-buffer off` to run without it). With `--provider synthetic` (or `--fake`) a clearly-labelled SYNTHETIC
+event calendar is ALWAYS used, even if `data/events.csv` exists: real dates against invented prices say nothing (and, with the real calendar, the
+synthetic GLD sweep loses its only two entries to CPI/PPI windows).
 
 ## Rule interpretations I had to choose (check these)
 

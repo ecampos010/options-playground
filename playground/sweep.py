@@ -129,10 +129,10 @@ def run_sweep(spec: dict, args_ns, runs_dir="runs", log=print, command="") -> di
             key = cfg.ticker
             if key not in events_cache:
                 p = Path(args_ns.events)
-                if p.exists():
-                    events_cache[key] = (load_events(p), str(p))
-                elif provider.name == "synthetic":
+                if provider.name == "synthetic":      # real dates against invented prices say nothing: the synthetic world gets its own calendar
                     events_cache[key] = (provider.synthetic_events(), "SYNTHETIC-calendar(not real dates)")
+                elif p.exists():
+                    events_cache[key] = (load_events(p), str(p))
                 else:
                     from .events import EventsFileMissing
                     raise EventsFileMissing(f"events file not found: {p}; create it from templates/events.csv.template")
