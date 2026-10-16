@@ -6,8 +6,8 @@
     python scripts/fetch_context_data.py --html-dir saved/    # parse pre-downloaded pages instead of fetching
 
 Sources (public; the URL patterns below are the ones tried, in this order):
-  FOMC        federalreserve.gov/monetarypolicy/fomccalendars.htm (2020 onward), fomchistorical<year>.htm only for 2016-2019
-              (decision day = last day of each SCHEDULED meeting; unscheduled calls and notation votes are not events)
+  FOMC        federalreserve.gov/monetarypolicy/fomccalendars.htm, fomchistorical<year>.htm for 2016-2020 (decision day = last day of each scheduled
+              meeting; unscheduled / emergency meetings such as March 2020 are included; notation votes are not)
   CPI/PPI/NFP 1. bls.gov/bls/news-release/<cpi|ppi|empsit>.htm   archived releases; link names embed the date (empsit_08072026.htm)
               2. bls.gov/schedule/news_release/<cpi|ppi|empsit>.htm   reference month -> release date
               3. bls.gov/schedule/<year>/<MM>_sched_list.htm   monthly lists (recent years only; a 404 is non-fatal)
@@ -43,13 +43,13 @@ from pathlib import Path
 
 EVENT_TYPES = ("FOMC", "CPI", "PPI", "NFP", "ELECTION")
 KNOWN_TYPES = EVENT_TYPES + ("EARNINGS",)
-WEEKDAY_ONLY = ("FOMC", "CPI", "PPI", "NFP")
+WEEKDAY_ONLY = ("CPI", "PPI", "NFP")      # FOMC is exempt: emergency meetings can fall on a weekend (Sunday 15 March 2020)
 FOMC_PER_YEAR = (7, 9)                  # "about 8": the scheduled calendar has 8 every year in 2016-2026
 MONTHLY_PER_YEAR = 12                   # CPI, PPI, NFP: exactly 12 unless explicitly allowed (e.g. 2025 shutdown)
 BLS_RELEASES = {"CPI": "Consumer Price Index", "PPI": "Producer Price Index", "NFP": "Employment Situation"}
 FOMC_CAL_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 FOMC_HIST_URL = "https://www.federalreserve.gov/monetarypolicy/fomchistorical{year}.htm"
-FOMC_HIST_LAST = 2019                   # fomchistorical<year>.htm exists only up to about 2019; 2020+ is on the calendars page
+FOMC_HIST_LAST = 2020                   # fomchistorical<year>.htm is requested for 2016-2020; 2021+ comes from the calendars page
 # BLS, in the order tried per series (slug = cpi | ppi | empsit):
 BLS_ARCHIVE_URL = "https://www.bls.gov/bls/news-release/{slug}.htm"            # archived news releases by year; file names embed the release date (empsit_08072026.htm)
 BLS_SCHED_URL = "https://www.bls.gov/schedule/news_release/{slug}.htm"         # reference month -> release date, current / upcoming / prior years
@@ -148,10 +148,23 @@ _FOMC_HEAD = re.compile(r"\b(20\d\d) FOMC Meetings\b", re.I)
 _FOMC_HIST = re.compile(rf"\b({_MON})\.?\s+(\d{{1,2}})(?:\s*[-–]\s*(?:({_MON})\.?\s+)?(\d{{1,2}}))?\s+Meeting\b(?:\s*[-–]\s*(20\d\d))?", re.I)
 
 
-def parse_fomc(markup: str, year_hint: int | None = None) -> list[dt.date]:
-    """Decision dates (last day) of SCHEDULED meetings found in a Fed calendar or historical page."""
+_UNSCHED = re.compile(r"unscheduled|emergency|conference call", re.I)
+_NOTATION = re.compile(r"notation|\bvote\b", re.I)
+_CALL_A = re.compile(rf"(?:Conference Call|Unscheduled(?: Meeting)?)\W{{0,6}}({_MON})\.?\s+(\d{{1,2}})(?:,?\s+(20\d\d))?(?!\W{{0,3}}(?:notation|vote))", re.I)
+_CALL_B = re.compile(rf"\b({_MON})\.?\s+(\d{{1,2}})(?:,?\s+(20\d\d))?\s*\W{{0,3}}\s*(?:Conference Call|\(?Unscheduled)", re.I)
+
+
+def parse_fomc_detail(markup: str, year_hint: int | None = None) -> dict:
+    """{decision date: scheduled?} for every FOMC meeting on a Fed calendar or historical page.
+
+    Scheduled meetings use their last day. Unscheduled / emergency meetings and conference calls (e.g. March 2020) are included with
+    scheduled=False. Notation votes are not meetings and are skipped."""
     lines = html_lines(markup)
-    found: set[dt.date] = set()
+    found: dict = {}
+
+    def add(d: dt.date, sched: bool):
+        found[d] = found.get(d, False) or sched
+
     year = year_hint
     i = 0
     while i < len(lines):
@@ -163,8 +176,8 @@ def parse_fomc(markup: str, year_hint: int | None = None) -> list[dt.date]:
         if m and year and i + 1 < len(lines):
             d = _FOMC_DAY_LINE.match(lines[i + 1])
             if d:
-                tail = (d.group(3) + " " + (lines[i + 2] if i + 2 < len(lines) else "")).lower()
-                if not re.search(r"unscheduled|notation|conference call|\bvote\b", tail):
+                tail = d.group(3) + " " + (lines[i + 2] if i + 2 < len(lines) and not _FOMC_MONTH_LINE.match(lines[i + 2]) else "")
+                if not _NOTATION.search(tail):
                     m1 = month_num(m.group(1))
                     m2 = month_num(m.group(2)) if m.group(2) else m1
                     d1, d2 = int(d.group(1)), int(d.group(2) or d.group(1))
@@ -172,7 +185,7 @@ def parse_fomc(markup: str, year_hint: int | None = None) -> list[dt.date]:
                     if d.group(2) and d2 < d1 and not m.group(2):
                         raise SanityError(f"FOMC: day range {d1}-{d2} goes backwards under month '{ln}'")
                     try:
-                        found.add(dt.date(year, mm, d2))
+                        add(dt.date(year, mm, d2), not _UNSCHED.search(tail))
                     except ValueError as e:
                         raise SanityError(f"FOMC: bad date {year}-{mm}-{d2} ({e})")
                     i += 2
@@ -183,18 +196,34 @@ def parse_fomc(markup: str, year_hint: int | None = None) -> list[dt.date]:
         yr = int(hm.group(5)) if hm.group(5) else year_hint
         if not yr:
             continue
-        before = text[max(0, hm.start() - 20):hm.start()].rsplit("Meeting", 1)[-1]          # only the words attached to THIS heading,
-        after = re.split(rf"\b{_MON}\b", text[hm.end():hm.end() + 30], maxsplit=1, flags=re.I)[0]    # not those of the neighbouring ones
-        if re.search(r"unscheduled", before + " " + after, re.I):
-            continue
+        before = text[max(0, hm.start() - 20):hm.start()]
+        after = text[hm.end():hm.end() + 30]
+        tag = r"(?:unscheduled|emergency)"          # not "conference call": that belongs to the NEXT heading
+        if re.search(r"(?:notation|\bvote\b)\W{0,3}$", before, re.I) or re.match(r"\W{0,4}(?:notation|vote)", after, re.I):
+            continue                                  # keywords only count when attached to THIS heading, never a neighbour's
+        sched = not (re.search(rf"{tag}\W{{0,3}}$", before, re.I) or re.match(rf"\W{{0,4}}{tag}", after, re.I))
         m1 = month_num(hm.group(1))
         m2 = month_num(hm.group(3)) if hm.group(3) else m1
         day = int(hm.group(4) or hm.group(2))
         try:
-            found.add(dt.date(yr, m2, day))
+            add(dt.date(yr, m2, day), sched)
         except ValueError as e:
             raise SanityError(f"FOMC: bad date {yr}-{m2}-{day} ({e})")
-    return sorted(found)
+    for rx in (_CALL_A, _CALL_B):                    # "Conference Call - March 3, 2020" / "March 15 Conference Call"
+        for cm in rx.finditer(text):
+            yr = int(cm.group(3)) if cm.group(3) else year_hint
+            if not yr:
+                continue
+            try:
+                add(dt.date(yr, month_num(cm.group(1)), int(cm.group(2))), False)
+            except ValueError:
+                continue
+    return found
+
+
+def parse_fomc(markup: str, year_hint: int | None = None, unscheduled: bool = True) -> list[dt.date]:
+    """Decision dates found on the page (unscheduled / emergency meetings included unless unscheduled=False)."""
+    return sorted(d for d, sched in parse_fomc_detail(markup, year_hint).items() if sched or unscheduled)
 
 
 # ------------------------------------------------------------------ BLS
@@ -344,6 +373,7 @@ def check_events(rows: list[tuple], y0: int, y1: int, allow: dict | None = None,
     for y in range(y0, y1 + 1):
         n = counts.get((y, "FOMC"), 0)
         lo, hi = FOMC_PER_YEAR if (y, "FOMC") not in allow else (allow[(y, "FOMC")],) * 2
+        hi += 0 if (y, "FOMC") in allow else 3                     # --check cannot tell scheduled from emergency rows: allow a few extras
         if not lo <= n <= hi:
             bad.append(f"{y}: {n} FOMC meetings, expected {lo}-{hi}: " + ", ".join(str(d) for d, e, *_ in rows if e == "FOMC" and d.year == y))
         for e in ("CPI", "PPI", "NFP"):
@@ -450,23 +480,27 @@ def _by_year(dates) -> dict:
     return out
 
 
-def gather_events(fetch, y0: int, y1: int, allow: dict, fred_key: str | None, failures: list, log=print) -> dict:
+def gather_events(fetch, y0: int, y1: int, allow: dict, fred_key: str | None, failures: list, log=print, unsched: set | None = None) -> dict:
     """-> {(event, year): (sorted dates, source label)}. Each (event, year) takes the first source with the expected count, else the fullest one."""
     chosen: dict = {}
+    unsched = unsched if unsched is not None else set()
     years = range(y0, y1 + 1)
-    # ---- FOMC: calendars page (2020+), fomchistorical<year> only for years <= 2019 that the calendars page lacks
+    # ---- FOMC: calendars page, plus fomchistorical<year> for 2016-2020 (scheduled and emergency meetings merged)
     cal = try_fetch(fetch, FOMC_CAL_URL, failures)
-    fom = _by_year(parse_fomc(cal)) if cal else {}
+    det = parse_fomc_detail(cal) if cal else {}
     for y in years:
-        got, src = set(fom.get(y, ())), "fomccalendars.htm"
-        if len(got) < FOMC_PER_YEAR[0] and y <= FOMC_HIST_LAST:
+        cur = {d: sc for d, sc in det.items() if d.year == y}
+        src = "fomccalendars.htm"
+        if y <= FOMC_HIST_LAST:                      # historical pages for 2016-2020 are always requested and merged with the calendars page
             page = try_fetch(fetch, FOMC_HIST_URL.format(year=y), failures)
             if page:
-                more = set(parse_fomc(page, y))
-                if len(more) > len(got):
-                    got, src = more | got, f"fomchistorical{y}.htm"
-        if got:
-            chosen[("FOMC", y)] = (sorted(got), src)
+                more = {d: sc for d, sc in parse_fomc_detail(page, y).items() if d.year == y}
+                if more:
+                    src = f"fomchistorical{y}.htm" + (" + fomccalendars.htm" if cur else "")
+                    cur = {d: more.get(d, False) or cur.get(d, False) for d in {*cur, *more}}
+        if cur:
+            chosen[("FOMC", y)] = (sorted(cur), src)
+            unsched.update(d for d, sc in cur.items() if not sc)
     # ---- CPI / PPI / NFP
     pages: dict = {}
 
@@ -527,16 +561,19 @@ def gather_events(fetch, y0: int, y1: int, allow: dict, fred_key: str | None, fa
     return chosen
 
 
-def coverage(rows: list, y0: int, y1: int, allow: dict) -> tuple:
+def coverage(rows: list, y0: int, y1: int, allow: dict, unsched: set | None = None) -> tuple:
     """-> (counts, warnings). Warnings are anomalies; absence is shown as MISSING in the table."""
     counts: dict = defaultdict(int)
     for d, e, *_ in rows:
         counts[(d.year, e)] += 1
     warns = []
+    extra: dict = defaultdict(int)
+    for d in (unsched or ()):
+        extra[d.year] += 1
     for y in range(y0, y1 + 1):
-        n = counts.get((y, "FOMC"), 0)
+        n = counts.get((y, "FOMC"), 0) - extra.get(y, 0)           # the ~8 check counts SCHEDULED meetings; emergency ones are extra rows
         if n and not FOMC_PER_YEAR[0] <= n <= FOMC_PER_YEAR[1] and (y, "FOMC") not in allow:
-            warns.append(f"{y}: {n} FOMC meetings (expected {FOMC_PER_YEAR[0]}-{FOMC_PER_YEAR[1]})")
+            warns.append(f"{y}: {n} scheduled FOMC meetings (expected {FOMC_PER_YEAR[0]}-{FOMC_PER_YEAR[1]})")
         for e in ("CPI", "PPI", "NFP"):
             n = counts.get((y, e), 0)
             want = allow.get((y, e), MONTHLY_PER_YEAR)
@@ -545,20 +582,22 @@ def coverage(rows: list, y0: int, y1: int, allow: dict) -> tuple:
     return dict(counts), warns
 
 
-def table_text(counts: dict, y0: int, y1: int, allow: dict) -> str:
+def table_text(counts: dict, y0: int, y1: int, allow: dict, unsched: set | None = None) -> str:
     ys = list(range(y0, y1 + 1))
     L = ["event      " + "".join(f"{y:>9}" for y in ys)]
     for e in EVENT_TYPES:
         cells = []
         for y in ys:
             n = counts.get((y, e), 0)
+            ex = sum(1 for d in (unsched or ()) if d.year == y) if e == "FOMC" else 0
+            n -= ex
             exp = (FOMC_PER_YEAR if e == "FOMC" else (1, 1) if e == "ELECTION" else (allow.get((y, e), MONTHLY_PER_YEAR),) * 2)
             if e == "ELECTION" and y % 2:
                 cells.append("-")
-            elif n == 0:
+            elif n + ex == 0:
                 cells.append("MISSING")
             else:
-                cells.append(f"{n}" + ("" if exp[0] <= n <= exp[1] else "!"))
+                cells.append(f"{n}" + (f"+{ex}" if ex else "") + ("" if exp[0] <= n <= exp[1] else "!"))
         L.append(f"{e:<10} " + "".join(f"{c:>9}" for c in cells))
     return "\n".join(L)
 
@@ -588,7 +627,8 @@ def run(fetch, out_dir: Path, y0: int, y1: int, series: str, allow: dict, today:
     ev_path, rt_path = out_dir / "events.csv", out_dir / "rates.csv"
     failures: list = []
     log(f"fetching FOMC / BLS calendars {y0}-{y1}" + (" (FRED release dates enabled as fallback)" if fred_key else " (no FRED_API_KEY: FRED release-date fallback off)") + " ...")
-    chosen = gather_events(fetch, y0, y1, allow, fred_key, failures, log)
+    unsched: set = set()
+    chosen = gather_events(fetch, y0, y1, allow, fred_key, failures, log, unsched)
     rows = {(d, e, "") for (e, y), (ds, _) in chosen.items() for d in ds}
     old = read_events_csv(ev_path) if ev_path.exists() else []
     have = {(e, y) for (e, y) in chosen}
@@ -602,7 +642,7 @@ def run(fetch, out_dir: Path, y0: int, y1: int, series: str, allow: dict, today:
             chosen[(e, d.year)][0].append(d)
             kept += 1
     rows = sorted(rows, key=lambda r: (r[0], r[1], r[2]))
-    counts, warns = coverage(rows, y0, y1, allow)
+    counts, warns = coverage(rows, y0, y1, allow, unsched)
     if rows:
         write_atomic(ev_path, events_text(rows, today.isoformat()))
         log(f"wrote {ev_path} ({len(rows)} rows" + (f", {kept} kept from the previous file for holes in this run" if kept else "") + ")")
@@ -628,7 +668,7 @@ def run(fetch, out_dir: Path, y0: int, y1: int, series: str, allow: dict, today:
         except SanityError as e:
             rate_msg = f"rates.csv NOT written ({e})"
     log(rate_msg)
-    log("\nCOVERAGE (count per event type and year; ! = unexpected count, MISSING = nothing found):\n" + table_text(counts, y0, y1, allow))
+    log("\nCOVERAGE (count per event type and year; ! = unexpected count, MISSING = nothing found):\n" + table_text(counts, y0, y1, allow, unsched))
     log("\nSOURCE USED PER EVENT AND YEARS:\n" + source_text(chosen, y0, y1))
     for w in warns + rwarn:
         log(f"WARNING: {w}")

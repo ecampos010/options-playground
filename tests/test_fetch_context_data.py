@@ -33,7 +33,7 @@ def fomc_calendar_html(years):
                      f'<div class="fomc-meeting__date">{a.day}-{b.day}</div></div>')
             h.append(f"<div>Minutes: Released {MON[b.month - 1]} {b.day + 1}, {y}</div>")      # must not be read as a meeting
         # an unscheduled call and a notation vote
-        h.append('<div class="row"><div class="fomc-meeting__month"><strong>March</strong></div><div class="fomc-meeting__date">15</div><div>(unscheduled)</div></div>')
+        h.append('<div class="row"><div class="fomc-meeting__month"><strong>March</strong></div><div class="fomc-meeting__date">29</div><div>(unscheduled)</div></div>')
         h.append('<div class="row"><div class="fomc-meeting__month"><strong>October</strong></div><div class="fomc-meeting__date">4</div><div>(notation vote)</div></div>')
         h.append("</div>")
     return "".join(h) + "</body></html>"
@@ -87,9 +87,13 @@ def schedule_html(event, years):
     return f"<table>{rows}</table>"
 
 
-def hist_html(y):
+def hist_html(y, calls=()):
     h = "".join(f"<h5>{MON[a.month - 1]} {a.day}-{b.day} Meeting - {y}</h5>" for a, b in fx_fomc(y))
+    h += "".join(f"<h5>Conference Call - {MON[d.month - 1]} {d.day}, {y}</h5>" for d in calls)
     return f"<html><body>{h}<h5>October 4 Meeting (unscheduled)</h5></body></html>"
+
+
+EMERGENCY_2020 = [dt.date(2020, 3, 3), dt.date(2020, 3, 15)]       # FIXTURE copies of the two March 2020 emergency actions (15 March is a Sunday)
 
 
 def fred_json(event, y0, y1, extra=()):
@@ -116,7 +120,7 @@ def world(y0=2016, y1=2026, archive=True, sched_years=(), month_years=(), fomc_c
     w = World()
     w[F.FOMC_CAL_URL] = fomc_calendar_html(fomc_cal_years or range(2020, y1 + 1))
     for y in range(y0, min(y1, F.FOMC_HIST_LAST) + 1):
-        w[F.FOMC_HIST_URL.format(year=y)] = hist_html(y)
+        w[F.FOMC_HIST_URL.format(year=y)] = hist_html(y, EMERGENCY_2020 if y == 2020 else ())
     for ev, slug in F.BLS_SLUG.items():
         if archive:
             w[F.BLS_ARCHIVE_URL.format(slug=slug)] = archive_html(ev, range(y0, y1 + 1), skip)
@@ -137,10 +141,13 @@ LOG = lambda *_: None  # noqa: E731
 
 
 # ------------------------------------------------------------------ parsers
-def test_fomc_parser_takes_scheduled_decision_days_only():
-    got = F.parse_fomc(fomc_calendar_html([2019]))
-    assert set(got) == {b for a, b in fx_fomc(2019)}
-    assert dt.date(2019, 3, 15) not in got and dt.date(2019, 10, 4) not in got      # unscheduled / notation vote
+def test_fomc_parser_takes_scheduled_and_unscheduled_but_not_notation_votes():
+    html = fomc_calendar_html([2019])
+    sched = {b for a, b in fx_fomc(2019)}
+    assert set(F.parse_fomc(html, unscheduled=False)) == sched
+    got = F.parse_fomc(html)
+    assert set(got) == sched | {dt.date(2019, 3, 29)}                              # the "(unscheduled)" row is an FOMC event, the notation vote (Oct 4) is not
+    assert F.parse_fomc_detail(html)[dt.date(2019, 3, 29)] is False and F.parse_fomc_detail(html)[min(sched)] is True
 
 
 def test_fomc_cross_month_meeting_uses_the_second_month():
@@ -149,9 +156,27 @@ def test_fomc_cross_month_meeting_uses_the_second_month():
     assert F.parse_fomc(page) == [dt.date(2019, 2, 1), dt.date(2019, 5, 1)]
 
 
-def test_fomc_historical_heading_format():
-    page = "<h5>January 26-27 Meeting - 2016</h5><h5>April 26-27 Meeting - 2016</h5><h5>Conference Call - March 3, 2016</h5><h5>Unscheduled Meeting</h5>"
-    assert F.parse_fomc(page, 2016) == [dt.date(2016, 1, 27), dt.date(2016, 4, 27)]
+def test_fomc_historical_heading_format_with_emergency_calls():
+    page = ("<h5>January 26-27 Meeting - 2016</h5><h5>April 26-27 Meeting - 2016</h5><h5>Conference Call - March 3, 2016</h5>"
+            "<h5>March 15 Conference Call</h5><h5>Unscheduled Meeting</h5><h5>July 5 Notation Vote</h5>")
+    assert F.parse_fomc(page, 2016, unscheduled=False) == [dt.date(2016, 1, 27), dt.date(2016, 4, 27)]
+    assert F.parse_fomc(page, 2016) == [dt.date(2016, 1, 27), dt.date(2016, 3, 3), dt.date(2016, 3, 15), dt.date(2016, 4, 27)]
+
+
+def test_march_2020_emergency_meetings_are_fomc_events_including_the_sunday(tmp_path):
+    w = world()
+    w[F.FOMC_CAL_URL] = fomc_calendar_html(range(2021, 2027))                # the calendars page lacks 2020 entirely
+    out = []
+    r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=out.append)
+    fomc20 = sorted(d for d, e, _ in F.read_events_csv(tmp_path / "events.csv") if e == "FOMC" and d.year == 2020)
+    assert dt.date(2020, 3, 3) in fomc20 and dt.date(2020, 3, 15) in fomc20          # Tuesday call and Sunday call
+    assert dt.date(2020, 3, 15).weekday() == 6
+    assert {b for a, b in fx_fomc(2020)} <= set(fomc20)
+    text = "\n".join(out)
+    fomc_row = next(ln for ln in text.splitlines() if ln.startswith("FOMC"))
+    assert "MISSING" not in fomc_row and "8+3" in fomc_row and "2020" in text.split("SOURCE USED")[1]
+    assert "fomchistorical2020.htm" in text.split("SOURCE USED")[1] and r["exit"] == 0 and not r["warnings"]
+    F.check_existing(tmp_path, 2016, 2026, {}, TODAY, log=LOG)                       # --check accepts the weekend emergency row
 
 
 def test_bls_month_parser_picks_only_the_three_releases():
@@ -227,20 +252,21 @@ def test_fred_release_dates_parser_and_key_redaction():
     assert "SECRET" not in F.redact("GET https://api.stlouisfed.org/x?api_key=SECRET&file_type=json failed")
 
 
-def test_full_run_uses_historical_pages_only_through_2019_and_reports_sources(tmp_path):
+def test_full_run_uses_historical_pages_2016_to_2020_and_reports_sources(tmp_path):
     w = world()
     out = []
     r = F.run(w.fetch, tmp_path, 2016, 2026, "DFF", {}, TODAY, log=out.append)
     assert r["exit"] == 0
     asked = [u for u in w.requested if "fomchistorical" in u]
-    assert asked == [F.FOMC_HIST_URL.format(year=y) for y in range(2016, 2020)]       # never 2020..2026
+    assert asked == [F.FOMC_HIST_URL.format(year=y) for y in range(2016, 2021)]       # 2016-2020, never 2021+
     ev = F.read_events_csv(tmp_path / "events.csv")
     for y in range(2016, 2027):
-        for e, n in (("FOMC", 8), ("CPI", 12), ("PPI", 12), ("NFP", 12)):
+        extra = {2020: 4}.get(y, 1)                                     # fixture unscheduled rows: Oct 4 (<=2019); Mar 3, Mar 15, Mar 29, Oct 4 (2020); Mar 29 (2021+)
+        for e, n in (("FOMC", 8 + extra), ("CPI", 12), ("PPI", 12), ("NFP", 12)):
             assert sum(1 for d, ee, _ in ev if ee == e and d.year == y) == n, (y, e)
     text = "\n".join(out)
     rows = [ln for ln in text.split("SOURCE USED")[0].splitlines() if ln.startswith(("FOMC", "CPI", "PPI", "NFP", "ELECTION"))]
-    assert "COVERAGE" in text and len(rows) == 5 and not any("MISSING" in ln or "!" in ln for ln in rows)
+    assert "COVERAGE" in text and len(rows) == 5 and not any("MISSING" in ln or "!" in ln for ln in rows) and "8+1" in rows[0] and "8+4" in rows[0]
     src = text.split("SOURCE USED")[1]
     assert "fomchistorical2016.htm" in src and "fomccalendars.htm" in src and "bls archive" in src and "statutory rule" in src
     assert (tmp_path / "rates.csv").exists()
