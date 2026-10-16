@@ -63,7 +63,7 @@ python scripts/fetch_context_data.py --check            # re-validate the files 
 python scripts/fetch_context_data.py --html-dir saved/  # parse pages you saved in a browser if a site blocks scripts
 python scripts/fetch_context_data.py --allow 2025:CPI=11   # accept a genuine disruption, printed and never silent
 ```
-Sources, in the order tried: **FOMC** federalreserve.gov `fomccalendars.htm` (2020 onward) and `fomchistorical<year>.htm` only for 2016-2019; **CPI / PPI / NFP**
+Sources, in the order tried: **FOMC** federalreserve.gov `fomccalendars.htm` plus `fomchistorical<year>.htm` for 2016-2020 (unscheduled / emergency meetings such as March 2020 are included as FOMC rows; the ~8 check counts scheduled ones; notation votes are skipped); **CPI / PPI / NFP**
 (Employment Situation) bls.gov archived releases `bls/news-release/<cpi|ppi|empsit>.htm` (link names embed the date), then the schedule page
 `schedule/news_release/<slug>.htm`, then the monthly lists `schedule/<year>/<MM>_sched_list.htm` (recent years only); **fallback** FRED `fred/release/dates`
 (releases 10 CPI, 46 PPI, 50 Employment Situation) when `FRED_API_KEY` is in your environment (`set -a; source .env; set +a`; never printed or committed);
