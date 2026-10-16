@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Guard calibration study v3. Part A: how often SPX reaches ~16-delta strike distances after guard days.
+Part B: modeled iron-condor P&L (Black-Scholes, VIX as implied vol, our exit rules) for guard vs clean days.
+Usage: python3 guard_study.py [--px px.csv] [--vix vix.csv]   (no args = download).  Writes guard_results.md"""
+import argparse, io, math, sys
+from statistics import NormalDist
+import numpy as np, pandas as pd
+try:
+    from scipy.special import erf as _erf
+except Exception:
+    _erf = np.vectorize(math.erf)
+CBOE = "https://cdn-api.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
+FRED = "https://fred.stlouisfed.org/graph/fredgraph.csv?id="
+DTE, HT, TX = 35, 24, 10      # 35 cal days ~ 24 trading days; 21-DTE time exit ~ trading day 10
+R_, SKP, SKC, WIDTH = 0.02, 0.10, 0.05, 0.0064   # rate; put/call vol skew vs VIX; $5 width / SPY 778
+ENTRY_SLIP, STOP_SLIP, TP_SLIP = 0.05, 0.05, 0.02
+
+def get(url):
+    import requests
+    r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"}); r.raise_for_status(); return r.text
+
+def norm(df):
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    dc = [c for c in df.columns if c in ("date", "observation_date")][0]
+    df[dc] = pd.to_datetime(df[dc]); return df.set_index(dc).sort_index()
+
+def load_vix(path):
+    df = norm(pd.read_csv(path if path else io.StringIO(get(CBOE))))
+    return pd.to_numeric(df["close"] if "close" in df else df.iloc[:, 0], errors="coerce").rename("vix")
+
+def load_px(path):
+    if path: df = norm(pd.read_csv(path))
+    else:
+        try:
+            import yfinance as yf
+            df = yf.download("^GSPC", start="1990-01-01", progress=False, auto_adjust=False)
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+            df = norm(df.reset_index()); assert len(df) > 5000
+        except Exception as e:
+            print("yfinance failed (%s); falling back to FRED SP500 (closes only, ~10y)" % e, file=sys.stderr)
+            df = norm(pd.read_csv(io.StringIO(get(FRED + "SP500"))))
+            df["close"] = pd.to_numeric(df["sp500"], errors="coerce"); df["high"] = df["low"] = df["close"]
+    return df[["high", "low", "close"]].apply(pd.to_numeric, errors="coerce").dropna()
+
+def cdf(x): return 0.5 * (1 + _erf(x / math.sqrt(2)))
+def opt(S, K, T, sig, call):
+    if T <= 1e-9: return np.maximum(S - K, 0) if call else np.maximum(K - S, 0)
+    d1 = (np.log(S / K) + (R_ + sig ** 2 / 2) * T) / (sig * np.sqrt(T)); d2 = d1 - sig * np.sqrt(T)
+    return S * cdf(d1) - K * math.exp(-R_ * T) * cdf(d2) if call else K * math.exp(-R_ * T) * cdf(-d2) - S * cdf(-d1)
+def condor(S, Ksp, Klp, Ksc, Klc, T, v):
+    sp, sc = v * (1 + SKP), v * (1 - SKC)
+    return opt(S, Ksp, T, sp, 0) - opt(S, Klp, T, sp, 0) + opt(S, Ksc, T, sc, 1) - opt(S, Klc, T, sc, 1)
+
+def simulate(d, call_delta=.16, put_delta=.16, tx=TX, hold=HT):
+    """Enter a $5-wide-equivalent condor at each close; manage with TP 50% (mid), stop 2x credit (natural) or breach, time exit."""
+    n = len(d); S0 = d.close.values; v0 = d.vix.values / 100; T0 = DTE / 365
+    sp, sc = v0 * (1 + SKP), v0 * (1 - SKC); nd = NormalDist()
+    Ksp = S0 * np.exp((R_ + sp ** 2 / 2) * T0 - nd.inv_cdf(1 - put_delta) * sp * math.sqrt(T0))
+    Ksc = S0 * np.exp((R_ + sc ** 2 / 2) * T0 + nd.inv_cdf(1 - call_delta) * sc * math.sqrt(T0))
+    w = WIDTH * S0; Klp, Klc = Ksp - w, Ksc + w
+    cr = condor(S0, Ksp, Klp, Ksc, Klc, T0, v0) * (1 - ENTRY_SLIP)
+    alive = np.arange(n) + hold < n; pnl = np.full(n, np.nan); why = np.array([""] * n, dtype=object)
+    for k in range(1, hold + 1):
+        sh = lambda a: pd.Series(a).shift(-k).values
+        S, hi, lo, v = sh(d.close.values), sh(d.high.values), sh(d.low.values), sh(d.vix.values) / 100
+        T = max((DTE - k * DTE / HT) / 365, 0)
+        with np.errstate(all="ignore"):
+            Sb = np.where(S >= Ksc, S, np.where(S <= Ksp, S, np.where(hi >= Ksc, Ksc, Ksp)))
+            br = alive & ((hi >= Ksc) | (lo <= Ksp)); cb = np.minimum(condor(Sb, Ksp, Klp, Ksc, Klc, T, v) * (1 + STOP_SLIP), w)
+            mid = condor(S, Ksp, Klp, Ksc, Klc, T, v); nat = np.minimum(mid * (1 + STOP_SLIP), w)
+            a2 = alive & ~br; st = a2 & (nat >= 2 * cr); tp = a2 & ~st & (mid <= 0.5 * cr)
+            tm = a2 & ~st & ~tp & (k >= tx)
+        for m, cost, lab in ((br, cb, "breach"), (st, nat, "stop"), (tp, mid * (1 + TP_SLIP), "tp"), (tm, mid if T == 0 else nat, "time")):
+            pnl[m] = (cr - cost)[m]; why[m] = lab; alive &= ~m
+    return pd.DataFrame({"ror": pnl / (w - cr), "why": why, "cr": cr / w}, index=d.index)
+
+def rev(s, H, f): return f(s[::-1].rolling(H))[::-1].shift(-1)
+def episodes(mask, gap=10):
+    n = 0; last = -10 ** 9
+    for i in np.flatnonzero(mask.values):
+        if i - last > gap: n += 1
+        last = i
+    return n
+def pc(x): return "%.0f%%" % (100 * x)
+
+def touch_table(d, R, clean, H, half):
+    c = d.close; band = d.vix / 100 * np.sqrt(DTE / 365)
+    f = pd.DataFrame({"fmax": rev(d.high, H, lambda r: r.max()) / c - 1, "fmin": rev(d.low, H, lambda r: r.min()) / c - 1,
+                      "fv5": np.sqrt(rev(d.d1 ** 2, 5, lambda r: r.mean())) * np.sqrt(252)}, index=d.index)
+    f["call"] = f.fmax >= band; f["put"] = f.fmin <= -band; f["any"] = f.call | f.put; ok = f.fmax.notna()
+    base = f[clean & ok]["any"].mean(); rows = []
+    for k, m in R.items():
+        x = f[m & ok]
+        if len(x) == 0: continue
+        a1, a2 = x[x.index < half]["any"], x[x.index >= half]["any"]
+        rows.append([k, len(x), "%.1f%%" % (100 * len(x) / ok.sum()), episodes(m), pc(x.fv5.mean()), pc(x["any"].mean()), pc(x.call.mean()),
+                     pc(x.put.mean()), "%.2f" % (x["any"].mean() / base), "%s/%s" % (pc(a1.mean()) if len(a1) else "-", pc(a2.mean()) if len(a2) else "-")])
+    cols = ["rule", "days", "%days", "episodes", "fwd5d vol", "touch any", "call", "put", "lift", "1st/2nd half"]
+    return pd.DataFrame(rows, columns=cols), base
+
+def pl_table(sim, groups):
+    rows = []
+    for k, m in groups.items():
+        x = sim[m & sim.ror.notna()]
+        if len(x) == 0: continue
+        rows.append([k, len(x), "%.1f%%" % (100 * x.ror.mean()), pc((x.ror > 0).mean()), pc(x.why.isin(["breach", "stop"]).mean()),
+                     pc((x.why == "tp").mean()), "%.1f%%" % (100 * x.cr.mean()), "%.0f%%" % (100 * x.ror.quantile(.05))])
+    return pd.DataFrame(rows, columns=["group", "trades", "avg return on risk", "win", "stopped", "TP", "credit/width", "worst 5%"])
+
+def main():
+    ap = argparse.ArgumentParser(); ap.add_argument("--px"); ap.add_argument("--vix"); a = ap.parse_args()
+    d = load_px(a.px).join(load_vix(a.vix), how="inner").dropna()
+    d["d1"] = d.close.pct_change(); d["d5"] = d.close.pct_change(5); d = d.dropna(); half = d.index[len(d) // 2]
+    HG = (d.vix >= 25) | (d.d1 <= -.015); MG = (d.d1 >= .015) | (d.d5.abs() >= .04); UP = (d.d1 >= .015) | (d.d5 >= .04)
+    clean = ~(HG | MG)
+    R = {"CLEAN (no guard tripped)": clean, "HARD GATE (VIX>=25 or day<=-1.5%)": HG, "  VIX>=25 only": d.vix >= 25, "  day<=-1.5% only": d.d1 <= -.015}
+    for u in (.01, .015, .02): R["UP day>=+%.1f%%" % (u * 100)] = d.d1 >= u
+    for f in (.03, .04, .05): R["UP 5d>=+%d%%" % (f * 100)] = d.d5 >= f; R["DOWN 5d<=-%d%%" % (f * 100)] = d.d5 <= -f
+    R["MOVE GUARD (day>=+1.5% or |5d|>=4%)"] = MG; R["UP-ONLY GUARD (day>=+1.5% or 5d>=+4%)"] = UP
+    out = ["# Guard calibration study v3", "Data %s to %s (%d days). VIX from Cboe. Touch band = 1 sd of VIX over 35 days (about 16-delta distance). Episodes = clusters >10 trading days apart." % (d.index[0].date(), d.index[-1].date(), len(d))]
+    for H, lab in ((TX, "AS MANAGED: 10 trading days (35 -> 21 DTE time exit)"), (HT, "NO-CLOCK: 24 trading days (held toward expiry)")):
+        t, base = touch_table(d, R, clean, H, half)
+        out += ["", "## Part A, %s" % lab, "touch = SPX touched the band inside the window; lift = touch rate / CLEAN touch rate (%s).\n```" % pc(base), t.to_string(index=False), "```"]
+    G = {"CLEAN": clean, "HARD GATE": HG, "MOVE GUARD": MG, "UP-ONLY GUARD": UP, "DOWN 5d<=-4%": d.d5 <= -.04}
+    s1 = simulate(d); s2 = simulate(d, tx=HT, hold=HT)
+    out += ["", "## Part B, MODELED condor P&L (Black-Scholes, VIX as vol, put skew +%d%% / call -%d%%, entry slip %d%%, stop slip %d%%). Relative comparisons are the point, not dollars." % (SKP * 100, SKC * 100, ENTRY_SLIP * 100, STOP_SLIP * 100),
+            "Return on risk = P&L / (width - credit). Rules: TP 50% of credit on mid, stop at 2x credit or short-strike breach.", "", "### As managed (time exit at 21 DTE)", "```", pl_table(s1, G).to_string(index=False), "```",
+            "", "### No-clock (no time exit, hold toward expiry)", "```", pl_table(s2, G).to_string(index=False), "```"]
+    rows = []
+    for cd in (.16, .12, .10, .07):
+        sm = simulate(d, call_delta=cd); rows.append(pl_table(sm, {"UP-run, call %d delta" % (cd * 100): UP}).iloc[0].tolist())
+    rows.append(pl_table(s1, {"CLEAN days, call 16 delta (reference)": clean}).iloc[0].tolist())
+    out += ["", "### Enter after an up-run but push the CALL strike out (puts stay 16 delta)", "```", pd.DataFrame(rows, columns=pl_table(s1, G).columns).to_string(index=False), "```"]
+    mc = s1[clean & s1.ror.notna()].ror.mean(); out += ["", "## Verdict (rule: touch lift >= 1.25 in the whole sample AND above CLEAN in both halves AND episodes >= 10 AND modeled return below CLEAN)"]
+    ft, fb = touch_table(d, R, clean, TX, half)
+    for k, m in (("MOVE GUARD", MG), ("UP-ONLY GUARD", UP), ("HARD GATE", HG)):
+        r = ft[ft.rule.str.startswith({"MOVE GUARD": "MOVE", "UP-ONLY GUARD": "UP-ONLY", "HARD GATE": "HARD"}[k])].iloc[0]
+        h1, h2 = [float(z.strip("%")) / 100 if z != "-" else 0 for z in r["1st/2nd half"].split("/")]
+        ok = float(r.lift) >= 1.25 and h1 > fb and h2 > fb and r.episodes >= 10 and s1[m & s1.ror.notna()].ror.mean() < mc
+        out.append("- %s: %s" % (k, "SUPPORTED" if ok else "NOT SUPPORTED / INSUFFICIENT"))
+    s = "\n".join(out); open("guard_results.md", "w").write(s); print(s)
+
+main()
