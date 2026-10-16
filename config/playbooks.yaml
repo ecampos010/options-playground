@@ -1,6 +1,7 @@
 # Thresholds for "Playbooks and Awards". Fractions (0.15 = 15%). Nothing here is hard-coded in the selectors.
 # ruin = Monte Carlo P(broke) over the thermometer's ruin horizon; dd = replay max drawdown.
 disclaimer: "backtest on one 10-year history, not a promise or advice"
+require_beat_cash: true          # a pick must also beat a cash-only account earning the fed funds rate (columns from the report's interest replay)
 min_trades: 30                    # rows below this are flagged TOO FEW TRADES and excluded from every selector
 long_premium: [long_put, put_debit_spread, long_strangle]   # judged only by Big Short Style (they bleed in calm markets)
 playbooks:

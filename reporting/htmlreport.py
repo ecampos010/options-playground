@@ -90,7 +90,7 @@ def pct(x, d=1):
 
 
 def build_rows(ok: pd.DataFrame, br: pd.DataFrame, series: dict, start_eq: float, mc_run: bool, horizon: int):
-    rows, packs, axes = [], [], {}
+    rows, packs, axes, starts = [], [], {}, {}
     sidx = {}
     allr = pd.concat([ok.assign(_br=0), br.assign(_br=1)], ignore_index=True)
     for r in allr.to_dict("records"):
@@ -101,9 +101,13 @@ def build_rows(ok: pd.DataFrame, br: pd.DataFrame, series: dict, start_eq: float
             eqm, ddm, iso = monthly_pack(s["eq"], s["days"], start_eq)
             g = r["group"]
             axes.setdefault(g, iso)
+            starts.setdefault(g, str(s["days"][0].date()))
             if len(axes[g]) == len(eqm):
                 sref = len(packs)
-                packs.append([_b64(eqm), _b64(ddm)])
+                pk = [_b64(eqm), _b64(ddm)]
+                if "eq0" in s:
+                    pk.append(_b64(monthly_pack(s["eq0"], s["days"], start_eq)[0]))
+                packs.append(pk)
         d = {
             "rk": int(r["rank"]), "lvl": int(r["level"]), "lt": r["level_tag"], "pf": r["profile"], "tg": r["config_tag"],
             "st": r["strategy"], "tk": r["tickers"], "nt": int(r["n_tickers"]), "A": int(r["allocation"]),
@@ -113,11 +117,13 @@ def build_rows(ok: pd.DataFrame, br: pd.DataFrame, series: dict, start_eq: float
             "br": int(r["_br"]), "bd": r["broke_date"], "yrs": _f(r["years"], 2), "n": int(r["n_trades"]),
             "few": int(bool(r["too_few_trades"])), "zn": r["zone"], "ruin": _f(r.get("ruin_odds")), "dl": _f(r.get("short_delta"), 3),
             "vx": r.get("typical_vix", ""), "v": r["verdict"], "s": sref,
+            "fn": _f(r.get("final_equity_noint"), 0), "cn": _f(r.get("cagr_noint")), "xc": _f(r.get("excess_cagr")), "bc": int(bool(r.get("beats_cash", False))),
+            "cf": _f(r.get("cash_final"), 0), "cc": _f(r.get("cash_cagr")), "iu": _f(r.get("interest_usd"), 0),
             "hm": int(mc_run), "p10": _f(r.get(f"mc{horizon}_final_p10"), 0), "p50": _f(r.get(f"mc{horizon}_final_p50"), 0),
             "p90": _f(r.get(f"mc{horizon}_final_p90"), 0),
         }
         rows.append(d)
-    return rows, packs, axes
+    return rows, packs, axes, starts
 
 
 def summary_tiles(meta, ok, br, df) -> str:
@@ -133,13 +139,21 @@ def build_html(ctx: dict) -> str:
     ok, br, df = ctx["ok"], ctx["br"], ctx["df"]
     mc_run = meta["mc_run"]
     horizon = ctx["thermo_cfg"]["ruin_horizon_months"]
-    rows, packs, axes = build_rows(ok, br, ctx["series"], START_EQUITY, mc_run, horizon)
+    rows, packs, axes, starts = build_rows(ok, br, ctx["series"], START_EQUITY, mc_run, horizon)
     syn = meta["synthetic"]
     zones = [{"name": z["name"], "ruin": z["ruin"], "dd": z["dd"]} for z in ctx["thermo_cfg"]["zones"]]
     zone_names = [z["name"] for z in zones] + [ctx["thermo_cfg"].get("fallback_zone", "Breaking point")]
     spy = meta.get("spy")
+    rt = meta.get("rates")
+    cash = {}
+    if rt is not None:
+        for g, iso in axes.items():
+            d0 = pd.Timestamp(starts[g])
+            days = pd.DatetimeIndex([d0] + [pd.Timestamp(x) for x in iso])
+            cash[g] = _b64(rt.cash_curve(days, START_EQUITY)[1:])
     data = {
-        "meta": {"synthetic": syn, "start": START_EQUITY, "apy": meta["apy"], "spy": spy}, "rows": rows, "series": packs, "axes": axes,
+        "meta": {"synthetic": syn, "start": START_EQUITY, "apy": meta["apy"], "spy": spy, "rates_flat": bool(meta.get("rates_flat", True)),
+                 "cash_label": "Cash @ fed funds (risk-free)" if not meta.get("rates_flat", True) else f"Cash @ {meta['apy'] * 100:.1f}% flat"}, "cash": cash, "rows": rows, "series": packs, "axes": axes,
         "zones": zones, "zone_names": zone_names, "vixnames": VIX_NAMES, "horizon": horizon, "mixname": ctx["mixname"],
     }
 
@@ -171,11 +185,11 @@ def _page(ctx, data, syn) -> str:
         parts.append('<div class="synth">SYNTHETIC: every number on this page comes from generated fixture logs (make-synthetic-logs), '
                      "not from market data. It only proves the machinery works.</div>")
     parts.append(f'<p class="muted small">Generated {e(meta["generated"])} from {e(meta["runs_desc"])}. Research software, not advice. '
-                 f'Start equity $100,000; idle cash earns {meta["apy"] * 100:.1f}% APY; sizing = allocation x current equity split equally across tickers; '
+                 f'Start equity $100,000; idle cash interest: {e(meta.get("interest_desc", ""))}; sizing = allocation x current equity split equally across tickers; '
                  f'per-expiry cap {e(meta["expiry_cap"])}; circuit breaker {e(meta["cb"])}. Monte Carlo: {e(meta["mc_desc"])}. Delta source: {e(meta.get("delta_source", "unknown"))}. '
                  f'Open trades excluded (expiry after the last data date; never counted as wins or losses): {int(meta.get("open_excluded", 0))}.</p>')
     parts.append('<nav class="toc"><a href="#explorer">Equity &amp; thermometer</a><a href="#ranking">Ranking</a><a href="#playbooks">Playbooks &amp; awards</a><a href="#vix">VIX regimes</a>'
-                 '<a href="#ways">Ways to lose money</a><a href="#stress">Stress lab</a><a href="#mgmt">Management rules</a><a href="#method">Caveats</a>'
+                 '<a href="#ways">Ways to lose money</a><a href="#stress">Stress lab</a><a href="#mgmt">Management rules</a><a href="#why">Why cards</a><a href="#red-months">Red months</a><a href="#method">Caveats</a>'
                  '<button id="btn-theme" type="button" aria-label="Toggle light/dark">Light / dark</button></nav>')
     parts.append(summary_tiles(meta, ctx["ok"], ctx["br"], ctx["df"]))
     # explorer
@@ -244,6 +258,8 @@ def _page(ctx, data, syn) -> str:
                  f'A rule is "holds up" only if it beats baseline in both the first and second half of the sample; otherwise "unproven". '
                  f'Configs with different strikes (delta/profile variants) are not management rules and are excluded: {e(", ".join(mg.get("excluded_other_strikes", [])) or "none")}.</p>' +
                  (table(["Rule", "Early exits", "Saved", "Cost", "Net vs holding", "Whipsaw", "Matched entries", "Mean vs baseline / contract", "1st half", "2nd half", "Label"], mr, num=(1, 2, 3, 4, 5, 6, 7, 8, 9)) if mr else "<p>not run (no baseline config found).</p>"))
+    if ctx.get("why"):
+        parts.append(ctx["why"]["html"])
     parts.append('<h2 id="method">What this does NOT tell you</h2><ul class="small"><li>A ~10-year sample: relative comparison only, not a forecast; tails are understated.</li>'
                  "<li>Bootstrap resampling can never create a month worse than the worst one observed.</li><li>No taxes, no margin-call mechanics, no early-assignment modelling beyond the logged flag.</li>"
                  "<li>Unit logs are replayed at fixed sizing rules; real fills at size would differ (liquidity, slippage).</li>"

@@ -13,7 +13,9 @@ import pandas as pd
 
 from . import ALLOCATIONS, CAVEAT, LEVEL_TAGS, START_EQUITY
 from . import grid as G
-from . import htmlreport, mgmt, playbooks, stress, thermo, verdicts, ways
+from . import context as ctxmod
+from . import htmlreport, mgmt, playbooks, stress, thermo, verdicts, ways, why
+from .cash import RateTable
 from .replay import ReplayConfig, build_variant
 from .schema import load_runs
 
@@ -38,6 +40,11 @@ class ReportOptions:
     config_dir: str | None = None
     synthetic: bool | None = None
     playbooks_json: str | None = None      # default: results/playbooks.json
+    rates: str | None = "data/rates.csv"   # daily fed funds (scripts/fetch_context_data.py); missing file -> flat --apy, stated in the header
+    events: str | None = "data/events.csv"
+    context_dir: str | None = "data"       # SPY/VIX daily files (data/underlying/*_daily.parquet) for the why cards
+    why: bool = True
+    why_max: int | None = None             # featured scenarios (default from config/why.yaml)
 
 
 def read_spy(path: str | None):
@@ -147,9 +154,11 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     vcfg = verdicts.load_config(cdir / "verdicts.yaml")
     wcfg = ways.load_config(cdir / "ways_to_lose.yaml")
     wcfg["base_floor"] = vcfg.get("ways_to_lose", {}).get("base_floor", 0.001)
-    rcfg = ReplayConfig(apy=o.apy, expiry_cap=o.expiry_cap, cb_days=o.cb)
+    rtab = RateTable.load(o.rates, o.apy)
+    rcfg = ReplayConfig(apy=o.apy, rates=rtab, expiry_cap=o.expiry_cap, cb_days=o.cb)
     gcfg = G.GridConfig(allocations=o.allocations, replay=rcfg, mc=not o.no_mc, paths=o.paths, block=o.block, seed=o.seed,
                         jobs=o.jobs, thermo_cfg=tcfg)
+    log(f"cash interest: {rtab.describe()}")
     log(f"loaded {len(lg.trades):,} trades / {len(lg.marks):,} marks from {runs}{'  [SYNTHETIC]' if synthetic else ''}")
     df, series = G.run_grid(lg.trades, lg.marks, gcfg, progress=None)
     if df.empty:
@@ -177,7 +186,10 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     vix = G.vix_regime_lookup(lg.trades, lg.marks, gcfg)
     spy, spy_msg = read_spy(o.spy_csv)
     nm = len(set(zip(lg.trades["profile"], lg.trades["config_tag"])))
-    meta = {"synthetic": synthetic, "apy": o.apy, "spy": spy, "n_trades": len(lg.trades), "mc_run": not o.no_mc,
+    d_first = min(v["days"][0] for v in series.values())
+    d_last = max(v["days"][-1] for v in series.values())
+    meta = {"synthetic": synthetic, "apy": o.apy, "spy": spy, "interest_desc": rtab.describe(d_first, d_last), "rates": rtab,
+            "rates_flat": rtab.is_flat, "rates_coverage": rtab.coverage(d_first, d_last), "n_trades": len(lg.trades), "mc_run": not o.no_mc,
             "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"), "runs_desc": f"{len(lg.configs)} run(s), {nm} profile/config variants in {runs}",
             "delta_source": lg.delta_source_summary(), "open_excluded": lg.open_excluded_total(),
             "expiry_cap": "off" if o.expiry_cap is None else f"{o.expiry_cap:.0%} of a ticker's share per expiry", "cb": "off" if not o.cb else f"{o.cb}-day pause after a losing month",
@@ -186,7 +198,17 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     pb = playbooks.build(df, series, lg.trades, st, spy, pcfg, synthetic=synthetic)
     pb_path = playbooks.write_json(pb, o.playbooks_json or "results/playbooks.json")
     (outp / "playbooks.md").write_text(playbooks.render_md(pb))
-    ctx = {"playbooks": pb, "meta": meta, "ok": ok, "br": br, "df": df, "series": series, "thermo_cfg": tcfg, "vix": vix, "ways": wtab, "analytic": an,
+    wh = None
+    if o.why:
+        cx = ctxmod.load_context(o.context_dir, o.events, rtab, lg.trades, o.spy_csv)
+        wcfg2 = why.load_config(cdir / "why.yaml" if (cdir / "why.yaml").exists() else None)
+        if o.why_max:
+            wcfg2["max_scenarios"] = o.why_max
+        wh = why.build(df, ok, pb, lg.trades, lg.marks, rcfg, cx, wcfg2, synthetic)
+        (outp / "why.md").write_text(wh["md"])
+        pd.DataFrame(wh["red_all"]).to_csv(outp / "red_months.csv", index=False)
+        (outp / "why.json").write_text(json.dumps(playbooks._clean({"context": wh["desc"], "scenarios": wh["scenarios"]}), indent=1))
+    ctx = {"playbooks": pb, "why": wh, "meta": meta, "ok": ok, "br": br, "df": df, "series": series, "thermo_cfg": tcfg, "vix": vix, "ways": wtab, "analytic": an,
            "stress": st, "bp": bp, "mgmt": mg, "mixname": G.MIX}
     page = htmlreport.build_html(ctx)
     (outp / "index.html").write_text(page, encoding="utf-8")
@@ -208,6 +230,10 @@ def run_report(runs: str, out: str, o: ReportOptions, log=print) -> dict:
     S.append(f"  ({nr} row(s) 'not run')")
     S.append(bp["line"])
     S.append(f"playbooks: {sum(p['status'] == 'ok' for p in pb['playbooks'])}/{len(pb['playbooks'])} picked, awards {sum(a['status'] == 'ok' for a in pb['awards'])}/{len(pb['awards'])} -> {pb_path}")
+    S.append(f"cash interest: {meta['interest_desc']}; beats cash (final equity above a cash-only account): {int(df['beats_cash'].sum())}/{len(df)} scenarios")
+    if wh:
+        S.append(f"why layer: {len(wh['scenarios'])} scenario(s), {sum(len(x['months']) for x in wh['scenarios'])} month cards, "
+                 f"{sum(len(x['episodes']) for x in wh['scenarios'])} drawdown cards, {len(wh['red_all'])} red month(s) -> why.md, why.json, red_months.csv")
     S.append(f"stress rows {len(st)}; mgmt scorecard: {mg['n_configs']} configs vs baseline '{mg['baseline']}' - " + (", ".join(f"{k} {v}" for k, v in mg["table"]["label"].value_counts().items()) if len(mg["table"]) else "none"))
     S.append(f"done in {time.time() - t0:.0f}s")
     for s in S:

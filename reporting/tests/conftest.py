@@ -58,5 +58,33 @@ def synth_dir(tmp_path_factory):
 def report_dir(synth_dir, tmp_path_factory):
     from reporting.pipeline import ReportOptions, run_report
     out = tmp_path_factory.mktemp("rep") / "report_synth"
-    run_report(str(synth_dir), str(out), ReportOptions(paths=300, jobs=1, allocations=[5, 15, 50, 100], playbooks_json=str(out.parent / 'results' / 'playbooks.json')), log=lambda *_: None)
+    run_report(str(synth_dir), str(out), ReportOptions(paths=300, jobs=1, allocations=[5, 15, 50, 100], playbooks_json=str(out.parent / 'results' / 'playbooks.json'),
+                                                       rates=str(out.parent / "no_such_rates.csv"), events=str(out.parent / "no_such_events.csv"), context_dir=None), log=lambda *_: None)
+    return out
+
+
+@pytest.fixture(scope="session")
+def context_files(tmp_path_factory):
+    """FIXTURE context data (generated, not market data): flat 1.5% fed funds cut to 0.1% mid-March 2020, a few events, SPY/VIX daily closes."""
+    d = tmp_path_factory.mktemp("ctx")
+    days = pd.date_range("2017-12-01", "2021-01-31")
+    pd.DataFrame({"date": days.date, "rate_pct": np.where(days < "2020-03-15", 1.5, 0.1)}).to_csv(d / "rates.csv", index=False)
+    ev = [("2018-03-21", "FOMC"), ("2018-06-13", "CPI"), ("2019-01-04", "NFP"), ("2020-03-18", "FOMC"), ("2020-03-11", "CPI"), ("2020-11-03", "ELECTION")]
+    pd.DataFrame(ev, columns=["date", "event"]).assign(symbol="").to_csv(d / "events.csv", index=False)
+    bd = pd.bdate_range("2017-11-01", "2021-01-31")
+    spy = 100.0 * (1 + 0.0003) ** np.arange(len(bd))
+    spy = np.where(bd >= "2020-03-02", spy * np.where(bd <= "2020-03-23", 0.75, 0.9), spy)
+    vix = np.where((bd >= "2020-03-02") & (bd <= "2020-04-15"), 40.0, 12.0)
+    (d / "underlying").mkdir()
+    pd.DataFrame({"date": bd, "close": spy}).to_parquet(d / "underlying" / "SPY_daily.parquet")
+    pd.DataFrame({"date": bd, "close": vix}).to_parquet(d / "underlying" / "VIX_daily.parquet")
+    return d
+
+
+@pytest.fixture(scope="session")
+def report_ctx_dir(synth_dir, context_files, tmp_path_factory):
+    from reporting.pipeline import ReportOptions, run_report
+    out = tmp_path_factory.mktemp("repctx") / "report_ctx"
+    run_report(str(synth_dir), str(out), ReportOptions(paths=100, jobs=1, allocations=[5, 15, 50], why_max=4, playbooks_json=str(out.parent / "pb.json"),
+                                                       rates=str(context_files / "rates.csv"), events=str(context_files / "events.csv"), context_dir=str(context_files)), log=lambda *_: None)
     return out

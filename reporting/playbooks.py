@@ -63,7 +63,14 @@ def pool_of(df: pd.DataFrame, cfg: dict) -> tuple[pd.DataFrame, dict]:
     info = {"scenarios_total": int(len(df)), "configs_total": int(df[["profile", "config_tag", "strategy"]].drop_duplicates().shape[0]),
             "excluded_too_few_trades": int(few.sum()), "excluded_broke": int((df["broke"] & ~few).sum()),
             "min_trades": mt, "ruin_available": bool(df["ruin_odds"].notna().any()) if "ruin_odds" in df else False}
-    p = df[~few & ~df["broke"] & ~df["strategy"].isin(lp)].copy()
+    keep = ~few & ~df["broke"] & ~df["strategy"].isin(lp)
+    info["require_beat_cash"] = bool(cfg.get("require_beat_cash", True) and "beats_cash" in df)
+    info["excluded_below_cash"] = 0
+    if info["require_beat_cash"]:
+        below = keep & ~df["beats_cash"].astype(bool)         # must beat a cash-only account earning the risk-free rate
+        info["excluded_below_cash"] = int(below.sum())
+        keep &= ~below
+    p = df[keep].copy()
     info["eligible"] = int(len(p))
     return p, info
 
@@ -122,8 +129,22 @@ def record(row: pd.Series, series: dict, start_eq: float) -> dict:
              cagr=_num(row["cagr"]), max_dd=_num(row["max_dd"]), win_rate=_num(row["win_rate"]),
              ruin_odds=_num(row.get("ruin_odds")), n_trades=int(row["n_trades"]), calmar=_num(row["calmar"]),
              broke=bool(row["broke"]))
+    if "final_equity_noint" in row:
+        r.update(final_equity_noint=_num(row["final_equity_noint"]), cagr_noint=_num(row["cagr_noint"]),
+                 total_return_noint=float(row["final_equity_noint"] / start_eq - 1.0), cash_final=_num(row["cash_final"]),
+                 cash_cagr=_num(row["cash_cagr"]), cash_total_return=float(row["cash_final"] / start_eq - 1.0),
+                 excess_cagr=_num(row["excess_cagr"]), beats_cash=bool(row["beats_cash"]), interest_usd=_num(row["interest_usd"]))
     r.update(halves(series, row["scenario_id"], start_eq))
     return r
+
+
+def _cash_txt(r: dict) -> str:
+    if r.get("cash_cagr") is None:
+        return ""
+    gap = r["excess_cagr"]
+    return (f"Interest on idle cash is included: without it the return would have been {pct(r['total_return_noint'], 0)} ({pct(r['cagr_noint'])} a year) "
+            f"instead of {pct(r['total_return'], 0)}. A cash-only account earning the fed funds rate would have returned {pct(r['cash_total_return'], 0)} "
+            f"({pct(r['cash_cagr'])} a year), so it " + (f"beat cash by {gap * 100:.1f} CAGR points. " if gap > 0 else f"did NOT beat cash (short by {-gap * 100:.1f} points). "))
 
 
 def _halves_txt(r: dict) -> str:
@@ -143,7 +164,7 @@ def paragraph(key: str, r: dict, ctx: dict) -> str:
             f"{pct(r['total_return'], 0)} in total ({pct(r['cagr'])} a year), with a worst drawdown of {pct(r['max_dd'])}, "
             f"a {pct(r['win_rate'], 0)} win rate over {r['n_trades']} trades and {_ruin_txt(r)}. ")
     tried = f"It is the best of {ctx['n_candidates']} scenarios that met the limits, out of {ctx['pool']['scenarios_total']} tried. "
-    tail = _halves_txt(r) + ". "
+    tail = _cash_txt(r) + _halves_txt(r) + ". "
     extra = {
         "capital_preservation": "This is the setup that hurt least while still making money; the price of that is usually a modest return. ",
         "conservative": "The boring way: stays in the Safe zone and aims for the best return per unit of drawdown. ",
@@ -272,7 +293,7 @@ def awards(df, pool, info, series, trades, cfg, start_eq) -> list:
         if row is None:
             return {**a, "status": "none", "reason": extra}
         r = record(row, series, start_eq)
-        return {**a, "status": "ok", **r, "paragraph": extra}
+        return {**a, "status": "ok", **r, "paragraph": extra + _cash_txt(r)}
 
     for key in ("highest_win_rate", "highest_roi"):
         row, n, why = select(pool, A[key], start_eq)
@@ -320,7 +341,9 @@ def _fmt_item(it: dict) -> list[tuple[str, str]]:
             ("Max drawdown", pct(it["max_dd"])), ("Win rate", pct(it["win_rate"], 0)),
             ("Ruin odds", "n/a" if it["ruin_odds"] is None else pct(it["ruin_odds"], 2)), ("Trades", str(it["n_trades"])),
             ("Configs tried", f"{it.get('n_configs_tried', '?')}"),
-            ("1st half", pct(it["first_half"])), ("2nd half", pct(it["second_half"]))]
+            ("1st half", pct(it["first_half"])), ("2nd half", pct(it["second_half"]))] + (
+        [("Return, no interest", pct(it["total_return_noint"], 0)), ("Cash-only", pct(it["cash_total_return"], 0)),
+         ("vs cash", f"{it['excess_cagr'] * 100:+.1f} pts" + ("" if it["beats_cash"] else " (below cash)"))] if it.get("cash_cagr") is not None else [])
 
 
 def render_html(res: dict, e=lambda s: __import__("html").escape(str(s))) -> str:
@@ -328,7 +351,9 @@ def render_html(res: dict, e=lambda s: __import__("html").escape(str(s))) -> str
     H = ['<h2 id="playbooks">Playbooks and Awards</h2>',
          f'<p class="small">Each card is one scenario picked from the {p["scenarios_total"]:,} replayed ({p["configs_total"]} distinct configs). '
          f'Scenarios with fewer than {p["min_trades"]} trades are flagged <b>TOO FEW TRADES</b> and excluded ({p["excluded_too_few_trades"]} of them); '
-         f'scenarios that went broke ({p["excluded_broke"]}) can only win "Worst Performance". Picking the best of many tries flatters the winner: '
+         f'scenarios that went broke ({p["excluded_broke"]}) can only win "Worst Performance". '
+         + (f'Scenarios that did not beat a cash-only account earning the fed funds rate are excluded too ({p.get("excluded_below_cash", 0)}). ' if p.get("require_beat_cash") else "")
+         + f'Picking the best of many tries flatters the winner: '
          'read the first-half vs second-half numbers. Rankings never use final equity alone, except Lottery Ticket.</p>']
     if res["synthetic"]:
         H.append('<div class="synth">SYNTHETIC: these picks come from generated fixture logs.</div>')

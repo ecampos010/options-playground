@@ -1,0 +1,13 @@
+# "Why" layer: explanation cards for every calendar month and every drawdown episode of the featured scenarios.
+# Wording is always "coincided with", never "caused by": the cards line up what else was going on, they do not prove a cause.
+max_scenarios: 8              # playbook/award picks first, then the top-ranked survivors, up to this many scenarios
+red_month_return: -0.01       # a month is "red" (listed in the Red months table) when its return is at or below this
+dd_episode_min: 0.03          # peak-to-trough drawdowns shallower than this get no episode card
+max_episode_events: 10        # events listed in an episode card (the count is always exact)
+event_types: [FOMC, CPI, PPI, NFP, ELECTION]
+event_filter_days: 2          # what-if: skip entries within this many business days before (and on) an event
+early_exit_reasons: [tp, stop, stop_dollar, breach, trigger_exit, time]    # what-if: hold these to expiry instead
+gap_through_wing_loss: 0.95   # a closed trade that lost at least this share of its max loss "gapped through a wing"
+vix_cutoffs: [15, 20, 30]     # VIX regime edges (matches the logs' vix_bucket)
+fed_regime: {move_bp: 10, low_rate_pct: 0.5, high_rate_pct: 4.0}   # hiking/cutting if the rate moved this much inside the window
+html_budget_bytes: 2500000    # stop adding scenarios to the HTML once the cards reach this size (the files still hold all of them)

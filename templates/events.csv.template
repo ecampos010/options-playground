@@ -1,8 +1,14 @@
-# Copy to data/events.csv and fill with REAL dates from official calendars. Never guess dates.
+# Normally you do NOT fill this by hand: run  python scripts/fetch_context_data.py  (on the VPS, needs internet).
+# It downloads FOMC (federalreserve.gov), CPI / PPI / NFP (bls.gov release schedule) and computes US Election Day,
+# then writes data/events.csv and the fed funds rate series data/rates.csv, and FAILS LOUDLY if a sanity check
+# fails (about 8 FOMC and 12 CPI / PPI / NFP per year, no duplicates, sorted, valid dates). EARNINGS rows are never
+# fetched: keep them per symbol below; the script preserves them when it rewrites the file.
+# If you must edit by hand, copy this file to data/events.csv and use REAL dates from official calendars. Never guess dates.
 # Columns: date,event[,symbol]
 #   date   = YYYY-MM-DD (ET calendar date of the release/event)
-#   event  = FOMC (decision day) | CPI | PPI | NFP (jobs report) | ELECTION (US Election Day) | EARNINGS
+#   event  = FOMC (decision day = last day of a scheduled meeting) | CPI | PPI | NFP (Employment Situation) | ELECTION (US Election Day) | EARNINGS
 #   symbol = only for EARNINGS rows (e.g. AAPL); ignored for other types. SPY runs ignore EARNINGS.
-# Lines starting with '#' are ignored.
+# Lines starting with '#' are ignored.  Re-check an existing file any time with:  python scripts/fetch_context_data.py --check
 date,event,symbol
 # 2024-01-31,FOMC,
+# 2024-02-01,EARNINGS,AAPL

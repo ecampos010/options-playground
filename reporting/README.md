@@ -26,6 +26,7 @@ A compact summary (< 40 lines) is printed.
 
 `report`/`demo` flags: `--allocations 5,15,20,50,100` `--apy 0.036` `--cb 0|21` (replay circuit breaker: pause entries 21 trading days after a
 losing calendar month) `--expiry-cap 0.6` (0 = off) `--paths 10000` `--block 1|2|3` `--seed 7` `--no-mc` `--jobs N`
+`--rates PATH` (default `data/rates.csv`) `--events PATH` (default `data/events.csv`) `--context-dir DIR` (default `data`; reads `underlying/SPY_daily.parquet` and `VIX_daily.parquet`) `--no-why` `--why-max N`
 `--spy-csv PATH` (local SPY daily CSV with a date and close/adj close column; omitted line is stated in the report) `--bp-strategy iron_condor`
 `--bp-tickers SPY` `--bp-profile '^green'` `--bp-dd 0.5` `--baseline-tag baseline` `--config-dir DIR`.
 
@@ -35,7 +36,9 @@ losing calendar month) `--expiry-cap 0.6` (0 = off) `--paths 10000` `--block 1|2
 * Entry: `contracts = floor(share x equity / collateral_per_contract)`, capped by the per-expiry cap (default 60% of the ticker's share) and by unreserved collateral
   (sleeve budget and account). `contracts < 1` => skipped and counted as "could not afford".
 * Realised P&L = contracts x `pnl_per_contract` at `exit_ts`; daily equity adds mark-to-market from `marks.csv`, so drawdowns include open-position losses.
-* Idle (unreserved) cash earns `--apy`; collateral earns nothing (conservative).
+* Idle (unreserved) cash earns interest; collateral earns nothing (conservative). With `data/rates.csv` (from `scripts/fetch_context_data.py`) the rate is the real
+  daily effective fed funds rate, actual/360, compounded over weekends and gaps; days before the file starts use the flat `--apy` (the header states the share).
+  If the file is missing the whole run uses the flat `--apy` and the report header says **FLAT FALLBACK**. See "Cash interest and vs cash" below.
 * **Broke** = equity < collateral of the cheapest 1-contract entry in the scenario, or <= 0. First broke date is recorded, entries stop, equity is floored at 0.
 * Paired: all scenarios of one profile/config share one calendar; only the knob (allocation, ticker set, cb) changes.
 * Metrics: final equity, CAGR, max drawdown, worst calendar month, worst trade (USD and % of equity at entry), win rate, profit factor, return/maxDD (CAGR / max(maxDD, 0.5%)),
@@ -95,3 +98,24 @@ The synthetic demo has no long-premium logs, so Big Short shows "not run" there.
 
 Open trades: a trade whose expiry is after the last data date is excluded from `trades.csv` (never a win or a loss); the count is in `meta.json`
 (`open_excluded`) and in the report header.
+
+## Cash interest and vs cash
+Every scenario is replayed twice, with and without interest on idle cash (same trades, sizing follows each account's own equity), and compared with a **cash-only
+account** that earns the same risk-free rate on the same dates. `results.csv` gains `final_equity_noint`, `cagr_noint`, `max_dd_noint`, `interest_usd`, `cash_final`,
+`cash_cagr`, `excess_cagr` (strategy CAGR minus cash CAGR) and `beats_cash`; the ranking table has a "vs cash (CAGR pts)" column, the equity chart draws the real cash curve
+and the selected scenario without interest (dashed), the thermometer panel lists both finals, and every playbook / award card prints the return with and without interest and
+the cash comparison. `config/playbooks.yaml: require_beat_cash` (default true) makes playbook and award picks drop any scenario whose final equity is below a cash-only account
+(Worst Performance is still chosen from everything); the pool line states how many were dropped. The parquet equity files include `equity_no_interest`.
+
+## Why cards and the Red months table
+`report` adds a "Why" section (`#why`), `why.md`, `why.json` and `red_months.csv`. For the featured scenarios (playbook and award picks, then the best-ranked survivors, up to
+`max_scenarios` in `config/why.yaml`; the scenario is re-replayed, so it ties to the grid) **every calendar month and every drawdown episode** (peak to recovery, depth at
+least `dd_episode_min`) gets a card with: P&L (trades vs interest), SPY move, VIX level, change and regime, FOMC/CPI/PPI/NFP/election dates inside the window, the fed funds
+regime (hiking / cutting / on hold, level), the losing trades tagged **stop hit**, **short-strike breach**, **gap through a wing** (lost at least 95% of max loss) or *still open*,
+and the biggest single contributor. Wording is always "coincided with", never "caused by". Each card also carries what-if lines; the scenario block adds three full replays of the
+same logged trades with one switch changed: **event filter** on vs off (skip entries within 2 business days before an event; if the logs already have `event` in `guards_on` the
+OFF side is reported as not computable), **early exits** on vs off (hold to expiry using `cf_pnl_to_expiry_per_contract`; end result exact, in-between marks carry the last mark) and
+**interest on cash** on vs off. The **Red months** table (months at or below `red_month_return`, default -1%) is searchable and every row links to its card.
+Data sources: `data/underlying/{SPY,VIX}_daily.parquet` (from `download --daily-only`), else the trade logs' own SPY spot and entry VIX (sparse, labelled as such);
+`events.csv` and `rates.csv` missing => those lines read "n/a". Cards are an association table, not an explanation engine: with ~10 years of one history, several things always
+"coincide" with a bad month.

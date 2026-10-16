@@ -20,6 +20,7 @@ ENTRY, EXIT = 1, 0
 class ReplayConfig:
     start_equity: float = START_EQUITY
     apy: float = 0.036
+    rates: object = None                # cash.RateTable (daily fed funds, or flat fallback); None = flat `apy` as before
     expiry_cap: float | None = 0.60     # max share of a sleeve's budget reserved on ONE expiry; None = off
     cb_days: int = 0                    # 0 = off, 21 = pause entries ~21 trading days after a losing calendar month
     min_trades_evidence: int = 30
@@ -161,12 +162,13 @@ def replay(vd: VariantData, mask: np.ndarray, alloc: float, cfg: ReplayConfig | 
     cb_ref = cfg.start_equity
     sk_cant = sk_cb = sk_cap = 0
     rate = cfg.apy
+    acc = cfg.rates.factors(vd.days) if cfg.rates is not None and rate else None   # apy=0 switches interest OFF (what-if / "without interest")
     ev = vd.events
     gaps = vd.gaps
     mid = vd.month_id
     for d in range(D):
         if d and gaps[d] > 0 and cash > reserved and rate:
-            cash += (cash - reserved) * ((1.0 + rate) ** (gaps[d] / 365.0) - 1.0)
+            cash += (cash - reserved) * ((acc[d] - 1.0) if acc is not None else ((1.0 + rate) ** (gaps[d] / 365.0) - 1.0))
         if cfg.cb_days and d and mid[d] != mid[d - 1]:
             prev_end = eq[d - 1]
             if prev_end < cb_ref:

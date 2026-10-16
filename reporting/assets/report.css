@@ -79,3 +79,11 @@ nav.toc{display:flex;flex-wrap:wrap;gap:6px 12px;font-size:.85rem;margin:8px 0}
 .verdict{min-width:240px;max-width:520px}
 @media (max-width:600px){.wrap{padding:16px}h1{font-size:1.2rem}.tile b{font-size:1.05rem}.verdict{min-width:200px}}
 @media print{.tip{display:none}}
+
+details.why-scn,details.why-card{border:1px solid var(--border);border-radius:6px;margin:.4rem 0;padding:.3rem .6rem;background:var(--card)}
+details.why-card.red{border-left:4px solid var(--s5)}
+details.why-card summary,details.why-scn summary{cursor:pointer}
+details.why-card dl{display:grid;grid-template-columns:max-content 1fr;gap:.2rem .8rem;margin:.4rem 0;font-size:.9rem}
+details.why-card dt{color:var(--muted)}
+details.why-card dd{margin:0;overflow-wrap:anywhere}
+#red-table tr[hidden]{display:none}

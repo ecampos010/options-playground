@@ -40,6 +40,11 @@ def main(argv=None):
         p.add_argument("--bp-dd", type=float, default=0.5)
         p.add_argument("--baseline-tag", default=None)
         p.add_argument("--config-dir", default=None)
+        p.add_argument("--rates", default="data/rates.csv", help="daily fed funds rates (scripts/fetch_context_data.py); if the file is missing idle cash earns the flat --apy and the report says so")
+        p.add_argument("--events", default="data/events.csv", help="event calendar for the why cards")
+        p.add_argument("--context-dir", default="data", help="folder with underlying/SPY_daily.parquet and VIX_daily.parquet for the why cards (else the trade logs' own spot/VIX are used, sparse)")
+        p.add_argument("--no-why", action="store_true", help="skip the explanation cards and Red months table")
+        p.add_argument("--why-max", type=int, default=None, help="how many scenarios get cards (default: config/why.yaml max_scenarios)")
         p.add_argument("--playbooks-json", default="results/playbooks.json", help="where to write the Playbooks and Awards JSON")
 
     r = sub.add_parser("report", help="build report/index.html and friends")
@@ -69,7 +74,8 @@ def main(argv=None):
         return ReportOptions(allocations=a.allocations, apy=a.apy, cb=a.cb, expiry_cap=(a.expiry_cap or None), paths=a.paths, block=a.block,
                              seed=a.seed, no_mc=a.no_mc, jobs=a.jobs, spy_csv=a.spy_csv, bp_strategy=a.bp_strategy,
                              bp_tickers=[t for t in a.bp_tickers.split(",") if t], bp_profile=a.bp_profile, bp_dd=a.bp_dd,
-                             baseline_tag=a.baseline_tag, config_dir=a.config_dir, playbooks_json=a.playbooks_json)
+                             baseline_tag=a.baseline_tag, config_dir=a.config_dir, playbooks_json=a.playbooks_json,
+                             rates=a.rates, events=a.events, context_dir=a.context_dir, why=not a.no_why, why_max=a.why_max)
     if a.cmd == "report":
         run_report(a.runs, a.out, opts(a))
     elif a.cmd == "demo":
