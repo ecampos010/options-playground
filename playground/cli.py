@@ -132,10 +132,10 @@ def get_events(args, cfg: Config, provider, required: bool = True):
     if not need:
         return None, "off"
     p = Path(args.events)
+    if provider.name == "synthetic":              # never mix a real data/events.csv with the synthetic world's prices
+        return provider.synthetic_events(), "SYNTHETIC-calendar(not real dates)"
     if p.exists():
         return load_events(p), str(p)
-    if provider.name == "synthetic":
-        return provider.synthetic_events(), "SYNTHETIC-calendar(not real dates)"
     if not required:
         print(f"WARNING: events file not found: {p}. Continuing with the earnings/FOMC event filters DISABLED for this "
               "plan (candidate-day counts are an upper bound). Create it from templates/events.csv.template with real "
@@ -267,7 +267,7 @@ def cmd_download(args):
             print(f"ERROR: events file not found: {p}. Create it from templates/events.csv.template "
                   "(real dates) or pass --event-buffer off.")
             return 2
-        ev, note = (load_events(p), str(p)) if p.exists() else (SyntheticProvider(
+        ev, note = (load_events(p), str(p)) if (p.exists() and not args.fake) else (SyntheticProvider(
             start=args.syn_start, end=args.syn_end).synthetic_events(), "SYNTHETIC")
     evx = EventIndex(ev, list(daily.index)) if ev is not None else None
     status = {}

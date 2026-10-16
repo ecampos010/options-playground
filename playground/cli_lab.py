@@ -212,10 +212,10 @@ def cmd_download_lab(args):
     note = "off"
     if base.event_buffer or base.earnings_filter:
         p = Path(args.events)
-        if p.exists():
-            ev, note = load_events(p), str(p)
-        elif args.fake:
+        if args.fake:
             ev, note = factory.synthetic("SPY", args.syn_start, args.syn_end, args.syn_seed).synthetic_events(), "SYNTHETIC"
+        elif p.exists():
+            ev, note = load_events(p), str(p)
         else:
             print(f"ERROR: events file not found: {p}. Create it from templates/events.csv.template (real dates) or pass --event-buffer off.")
             return 2

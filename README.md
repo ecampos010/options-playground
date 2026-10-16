@@ -76,8 +76,9 @@ The URL patterns were taken from web search results because the cloud sandbox ca
 `data/events.csv`, columns `date,event[,symbol]`; event in `FOMC, CPI, PPI, NFP, ELECTION, EARNINGS`
 (`symbol` only matters for EARNINGS). Lines starting with `#` are ignored. See `templates/events.csv.template`.
 `data/rates.csv` is `date,rate_pct` (percent, calendar-daily). **This repo never invents dates.** A missing file is a clear error (use
-`--event-buffer off` to run without it). With `--provider synthetic` and no file, a clearly-labelled SYNTHETIC
-event calendar is used.
+`--event-buffer off` to run without it). With `--provider synthetic` (or `--fake`) a clearly-labelled SYNTHETIC
+event calendar is ALWAYS used, even if `data/events.csv` exists: real dates against invented prices say nothing (and, with the real calendar, the
+synthetic GLD sweep loses its only two entries to CPI/PPI windows).
 
 ## Rule interpretations I had to choose (check these)
 
