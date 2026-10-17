@@ -21,7 +21,7 @@ GB and wall-clock at 2 threads (Value tier) and 4 threads (Standard limit), usin
    (`backtest`/`matrix`) as a sanity check: same rules, different fill timing (next bar) and fees.
 2. **SPY delta sweep (monthly cadence).** `plan --engine lab --strike-mode delta --delta 0.16 --entry-cadences monthly`.
    `download --engine lab --tickers SPY --entry-cadence monthly --strike-mode delta --delta 0.16 --dte-target 45`
-   (one bulk snapshot per entry). Repeat per DTE target you want (30/45/60/90: note 60-90 DTE have fewer entry days
+   (one bulk snapshot per entry). Repeat per DTE target you want (30/35/45/60/90: note 60-90 DTE have fewer entry days
    because only monthlies list that far out; skipped days appear as `cadence` in `blocked_entries.csv`).
    Then `sweep sweeps/spy_core.yaml` (cache only). The summary prints the NUMBER of configurations tried and the
    first-half/second-half split for anything that beats the baseline - **read the split, not the ranking**.

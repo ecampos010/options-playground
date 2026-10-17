@@ -219,11 +219,12 @@ def git_commit() -> str:
 
 class _Lab:
     def __init__(self, provider: Provider, cfg: Config, events, events_note: str, tinfo: TickerInfo | None,
-                 max_entries: int | None, window: dict | None):
+                 max_entries: int | None, window: dict | None, entry_log=None):
         if cfg.dte_target:
             cfg = cfg.replace(dte=[cfg.dte_target - 7, cfg.dte_target, cfg.dte_target + 7])
         self.strat = STRATEGIES[cfg.strategy]
         self.p, self.cfg, self.tinfo, self.window, self.max_entries = provider, cfg, tinfo, window, max_entries
+        self.entry_log = entry_log               # optional callable: one line per opened entry (download log)
         self.unit = cfg.sizing == "fixed1"
         self.events_note = events_note
         self.daily = provider.get_underlying_daily()
@@ -711,7 +712,7 @@ class _Lab:
             if built is None:
                 reason = "noquote"
                 continue
-            legs, quotes, deltas, width, dsrc = built
+            legs, quotes, deltas, width, dsrc, srcs = built
             opt = [l for l in legs if l.right != "S"]
             credit = open_credit(opt, quotes, cfg.fill, cfg.haircut)
             coll = collateral_per_contract(legs, credit, spot)
@@ -760,6 +761,8 @@ class _Lab:
             pos.last_mark = 100.0 * (credit - pos.last_nat) - fees
             pos.q = {}
             self.pos.append(pos)
+            if self.entry_log is not None:
+                self.entry_log(entry_log_line(cfg.ticker, d, e, f"{self.rid}-{pos.id}", legs, deltas, srcs))
             self._load(pos, d, ts)
             return None
         return reason
@@ -773,7 +776,7 @@ class _Lab:
         cfg = self.cfg
         strikes = self.p.list_strikes(d, e)
         width = spread_width(spot, strikes, cfg, self.tinfo)
-        qd, dsrc, deltas = {}, {"provider": 0, "bs_mid_iv": 0}, {}
+        qd, dsrc, deltas, srcs = {}, {"provider": 0, "bs_mid_iv": 0}, {}, {}
         T = self._T(e, d, minute)
         if cfg.strike_rule["mode"] == "delta":
             snap = self.p.chain_snapshot(d, e, minute, cfg.resolution, spot)
@@ -796,9 +799,10 @@ class _Lab:
                     dl[miss] = bs.delta(spot, k[miss], T, self.r, iv, r)
                     dsrc["bs_mid_iv"] += int((~np.isnan(dl[miss])).sum())
                 dsrc["provider"] += int((~miss).sum())
-                for kk, v in zip(k, dl):
+                for kk, v, fb in zip(k, dl, miss):
                     if v == v:
                         deltas[(r, round(float(kk), 4))] = float(v)
+                        srcs[(r, round(float(kk), 4))] = "black_scholes" if fb else "thetadata"
         else:
             need = self.strat.needed_strikes(strikes, cfg, spot, vix, width)
             for right, ks in need.items():
@@ -817,10 +821,11 @@ class _Lab:
             if l.right in "PC" and l.qty < 0 and (l.right, round(l.strike, 4)) not in deltas:
                 dl = bs.delta_from_mid(0.5 * sum(ch.quote(l.right, l.strike)), spot, l.strike, T, self.r, l.right)
                 if dl is not None:
-                    deltas[(l.right, l.strike)] = dl
+                    deltas[(l.right, round(l.strike, 4))] = dl
+                    srcs[(l.right, round(l.strike, 4))] = "black_scholes"
                     dsrc["bs_mid_iv"] += 1
         deltas = {(r, k): v for (r, k), v in deltas.items()}
-        return legs, quotes, deltas, width, dsrc
+        return legs, quotes, deltas, width, dsrc, srcs
 
     # ------------------------------------------------------------ result
     def _result(self, d0, d1) -> LabResult:
@@ -854,6 +859,20 @@ def is_open_at(expiry, last_data_date) -> bool:
     return pd.Timestamp(expiry).normalize() > pd.Timestamp(last_data_date).normalize()
 
 
+def entry_log_line(ticker, d, expiry, trade_id, legs, deltas, srcs) -> str:
+    """One download-log line per entry: each option leg's strike, its delta, and where that delta came from
+    ('thetadata' = ThetaData first_order Greeks, 'black_scholes' = BS from mid IV, 'none' = no delta computed)."""
+    parts = []
+    for l in legs:
+        if l.right == "S":
+            continue
+        key = (l.right, round(l.strike, 4))
+        dl = deltas.get(key)
+        parts.append(f"{'short' if l.qty < 0 else 'long'} {l.right}{l.strike:g} "
+                     f"delta={'nan' if dl is None else f'{dl:.4f}'} src={srcs.get(key, 'none')}")
+    return f"ENTRY {ticker} {d} exp {expiry} trade={trade_id} | " + " | ".join(parts)
+
+
 def delta_source_tag(counts: dict) -> str:
     """'theta_greeks' (every entry delta came from the ThetaData first_order Greeks), 'bs_fallback' (all Black-Scholes
     from mid IV) or 'mixed' (some legs fell back because their Greeks rows were junk/missing)."""
@@ -864,7 +883,7 @@ def delta_source_tag(counts: dict) -> str:
 
 
 def run_lab(provider: Provider, cfg: Config, events=None, events_note: str = "", tinfo: TickerInfo | None = None,
-            max_entries: int | None = None, window: dict | None = None) -> LabResult:
+            max_entries: int | None = None, window: dict | None = None, entry_log=None) -> LabResult:
     if tinfo is None:
         from .tickers import load_tickers
         tinfo = load_tickers().get(cfg.ticker)
@@ -874,7 +893,7 @@ def run_lab(provider: Provider, cfg: Config, events=None, events_note: str = "",
         raise ValueError(f"unknown action {cfg.action}")
     if cfg.event_buffer and events is None and not cfg.force_entry:
         raise ValueError("event_buffer is on but no events were supplied")
-    return _Lab(provider, cfg, events, events_note, tinfo, max_entries, window).run()
+    return _Lab(provider, cfg, events, events_note, tinfo, max_entries, window, entry_log).run()
 
 
 def save_lab_run(res: LabResult, runs_dir: str | Path = "runs", command: str = "") -> Path:

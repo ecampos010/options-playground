@@ -32,7 +32,7 @@ def add_lab_flags(p: argparse.ArgumentParser):
     g.add_argument("--strategy", default=S, help="iron_condor iron_butterfly bull_put_spread put_bwb cash_secured_put covered_call long_put put_debit_spread long_strangle")
     g.add_argument("--sizing", choices=["equity-pct", "fixed1"], default=S, help="fixed1 = unit mode (1 contract, logs for the replay layer)")
     g.add_argument("--entry-cadence", dest="entry_cadence", choices=["monthly", "weekly", "twice-weekly", "daily"], default=S)
-    g.add_argument("--dte-target", dest="dte_target", type=int, choices=[30, 45, 60, 90], default=S)
+    g.add_argument("--dte-target", dest="dte_target", type=int, choices=[30, 35, 45, 60, 90], default=S)
     g.add_argument("--width-mode", dest="width_mode", choices=["auto", "pct", "fixed"], default=S)
     g.add_argument("--width-pct", dest="width_pct", type=pctv, default=S, help="spread width as %% of spot (default 0.7)")
     g.add_argument("--min-credit-pct", dest="min_credit_pct", type=pctv, default=S, help="min credit as %% of width (default 10)")
@@ -245,7 +245,7 @@ def cmd_download_lab(args):
             status["stage_a"] = stage_a(prov, fetcher, cfg, evx, log, threads=args.threads, limit=args.limit_days, lab=True,
                                        progress_every=args.progress_every)
             if not status["stage_a"]["stopped"]:
-                res = run_lab(prov, apply_overrides(cfg, {"sizing": "fixed1"}), ev, note)
+                res = run_lab(prov, apply_overrides(cfg, {"sizing": "fixed1"}), ev, note, entry_log=log)
                 status["stage_b_pass"] = {"trades": len(res.trades), "gaps": res.meta["spot_coverage"]["days_without_spot"]}
         except BudgetExceeded as e:
             status["stopped"] = str(e)
