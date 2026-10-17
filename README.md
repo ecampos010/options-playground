@@ -123,7 +123,7 @@ Offline demo: add `--provider synthetic` to `run`, `sweep`, `stress`, `plan`. Ru
 | area | flags |
 |---|---|
 | universe | `--ticker SPY/QQQ/IWM/GLD/TLT` (`profiles/tickers.yaml`), `--width-mode auto/pct/fixed`, `--width-pct 0.7%`, `--min-credit-pct 10%` |
-| strikes | `--strike-mode vix-distance/delta`, `--delta`, `--put-delta`, `--call-delta`, `--dte-target 30/45/60/90`, `--entry-cadence monthly/weekly/twice-weekly/daily`, `--scale-in 1/4` |
+| strikes | `--strike-mode vix-distance/delta`, `--delta`, `--put-delta`, `--call-delta`, `--dte-target 30/35/45/60/90`, `--entry-cadence monthly/weekly/twice-weekly/daily`, `--scale-in 1/4` |
 | strategies | `--strategy iron_condor/iron_butterfly/bull_put_spread/put_bwb/cash_secured_put/covered_call` (undefined-risk structures are not implemented) |
 | exits | `--tp`, `--ifly-tp 25/50`, `--stop-mult 1.5/2/3/off`, `--stop-dollar`, `--time-exit 0/21/7`, `--breach on/off` |
 | triggers | `--trigger distance/delta --trigger-value ...  --action none/exit/roll_tested/roll_condor/roll_untested/close_tested_spread/hedge_put_call/hedge_shares`, `--max-rolls`, `--roll-credit-only`, `--roll-to-pct`, `--hedge-delta`, `--hedge-expiry`, `--stock-slip-bps` |

@@ -80,7 +80,7 @@ class Config:
     strategy: str = "iron_condor"            # iron_condor|iron_butterfly|bull_put_spread|put_bwb|cash_secured_put|covered_call|long_put|put_debit_spread|long_strangle
     sizing: str = "equity-pct"               # equity-pct | fixed1 (unit mode)
     entry_cadence: str = "weekly"            # monthly | weekly | twice-weekly | daily
-    dte_target: int | None = None            # 30|45|60|90 -> dte = [t-7, t, t+7]
+    dte_target: int | None = None            # 30|35|45|60|90 -> dte = [t-7, t, t+7]
     width_mode: str = "auto"                 # auto (tickers.yaml fixed else pct of spot) | pct | fixed
     width_pct: float = 0.007
     min_credit_pct: float = 0.10             # of width

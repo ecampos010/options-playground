@@ -386,3 +386,29 @@ def test_equity_mode_sizes_within_budget_and_cap():
     csp = run_lab(market(), cfg(sizing="equity-pct", strategy="cash_secured_put",
                                 strike_rule={"mode": "delta", "put_delta": .3, "call_delta": .3}), None, "", TI)
     assert len(csp.trades) == 0 and "size" in set(csp.blocked.reason)
+
+
+def test_dte_target_35_builds_28_to_42_window():
+    p = market(start="2016-01-04", end="2016-12-30")
+    r = run_lab(p, cfg(dte_target=35), None, "", TI)
+    assert len(r.trades) > 0 and r.trades.dte_entry.between(28, 42).all()
+
+
+@pytest.mark.parametrize("greeks", [False, True], ids=["black_scholes", "thetadata"])
+def test_entry_log_has_strike_delta_and_source_per_entry(greeks):
+    sr = {"mode": "delta", "put_delta": 0.16, "call_delta": 0.16}
+    lines = []
+    r = run_lab(market(lambda d, k: 100.0, provider_greeks=greeks), cfg(strike_rule=sr), None, "", TI,
+                entry_log=lines.append)
+    assert len(lines) == len(r.trades) > 0
+    want = "src=thetadata" if greeks else "src=black_scholes"
+    for line, t in zip(lines, r.trades.itertuples()):
+        assert f"trade={t.trade_id} " in line
+        legs = line.split(" | ")[1:]
+        sp = next(x for x in legs if x.startswith("short P"))
+        sc = next(x for x in legs if x.startswith("short C"))
+        assert want in sp and want in sc and "delta=nan" not in sp + sc
+        # the logged delta is the one the trade row carries for that side
+        assert float(sp.split("delta=")[1].split()[0]) == pytest.approx(t.short_put_delta, abs=1e-4)
+        assert float(sc.split("delta=")[1].split()[0]) == pytest.approx(t.short_call_delta, abs=1e-4)
+
