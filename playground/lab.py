@@ -219,12 +219,13 @@ def git_commit() -> str:
 
 class _Lab:
     def __init__(self, provider: Provider, cfg: Config, events, events_note: str, tinfo: TickerInfo | None,
-                 max_entries: int | None, window: dict | None, entry_log=None):
+                 max_entries: int | None, window: dict | None, entry_log=None, entry_days: set | None = None):
         if cfg.dte_target:
             cfg = cfg.replace(dte=[cfg.dte_target - 7, cfg.dte_target, cfg.dte_target + 7])
         self.strat = STRATEGIES[cfg.strategy]
         self.p, self.cfg, self.tinfo, self.window, self.max_entries = provider, cfg, tinfo, window, max_entries
         self.entry_log = entry_log               # optional callable: one line per opened entry (download log)
+        self.entry_days = entry_days             # None = every scheduled day; else only these dates may be entered
         self.unit = cfg.sizing == "fixed1"
         self.events_note = events_note
         self.daily = provider.get_underlying_daily()
@@ -256,7 +257,11 @@ class _Lab:
         self.adjust_log: list[dict] = []
         self.eq_rows = []
         self.n_entries = 0
-        self.rid = run_id_for(cfg, {"ticker": cfg.ticker, "events": events_note, "window": window})
+        self.leg_load_gaps = 0
+        rid_extra = {"ticker": cfg.ticker, "events": events_note, "window": window}
+        if entry_days is not None:               # keyed in only when used, so existing run ids do not change
+            rid_extra["entry_days"] = sorted(str(x) for x in entry_days)
+        self.rid = run_id_for(cfg, rid_extra)
         self.breach_on = cfg.breach_exit and self.strat.defaults.get("breach_exit", True)
         self.forced_dte = cfg.forced_close_dte if cfg.forced_close_dte is not None else self.strat.defaults.get("forced_close_dte")
         self.tp = cfg.ifly_tp if cfg.strategy == "iron_butterfly" else cfg.tp
@@ -286,6 +291,7 @@ class _Lab:
                                          self.cfg.resolution)
                 pos.q[(l.right, l.strike)] = (b.tolist(), a.tolist())
         except MissingData:
+            self.leg_load_gaps += 1          # position-days the cache could not price: not stopped or exited on those days
             pos.q = None
 
     def _quotes(self, pos: LabPos, b: int):
@@ -344,7 +350,8 @@ class _Lab:
                     self._load(pos, d, ts)
             entry_bars = []
             in_win = self.window is None or (self.window["start"] <= str(d) <= self.window["end"])
-            if d in sched and in_win and (self.max_entries is None or self.n_entries < self.max_entries):
+            if (d in sched and in_win and (self.entry_days is None or d in self.entry_days)
+                    and (self.max_entries is None or self.n_entries < self.max_entries)):
                 if not len(ts):
                     self._block(d, "nodata")
                 else:
@@ -842,6 +849,7 @@ class _Lab:
             "spot_coverage": {"days_by_source": self.spot_days, "days_without_spot": len(self.missing_spot_days),
                               "first_missing": self.missing_spot_days[:10]},
             "delta_source": self.delta_src, "delta_source_tag": delta_source_tag(self.delta_src), "unit_mode": self.unit, "notes": self.notes,
+            "leg_load_gaps": self.leg_load_gaps,
             "events": self.events_note, "fill_model": cfg.fill, "fee_per_contract": cfg.fee_per_contract,
             "config_tag": config_tag(cfg), "level": cfg.level, "window": self.window,
             "adjustments": self.adjust_log,
@@ -883,7 +891,8 @@ def delta_source_tag(counts: dict) -> str:
 
 
 def run_lab(provider: Provider, cfg: Config, events=None, events_note: str = "", tinfo: TickerInfo | None = None,
-            max_entries: int | None = None, window: dict | None = None, entry_log=None) -> LabResult:
+            max_entries: int | None = None, window: dict | None = None, entry_log=None,
+            entry_days: set | None = None) -> LabResult:
     if tinfo is None:
         from .tickers import load_tickers
         tinfo = load_tickers().get(cfg.ticker)
@@ -893,7 +902,7 @@ def run_lab(provider: Provider, cfg: Config, events=None, events_note: str = "",
         raise ValueError(f"unknown action {cfg.action}")
     if cfg.event_buffer and events is None and not cfg.force_entry:
         raise ValueError("event_buffer is on but no events were supplied")
-    return _Lab(provider, cfg, events, events_note, tinfo, max_entries, window, entry_log).run()
+    return _Lab(provider, cfg, events, events_note, tinfo, max_entries, window, entry_log, entry_days).run()
 
 
 def save_lab_run(res: LabResult, runs_dir: str | Path = "runs", command: str = "") -> Path:
