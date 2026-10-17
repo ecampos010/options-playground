@@ -1,4 +1,4 @@
-# Matched guarded vs plain comparison: method, audit and VPS run
+# Matched guarded vs unguarded comparison: method, audit and VPS run
 
 **Status: code and tests done. No real-data results yet.** The comparison is built to run on the VPS against the
 existing ThetaData cache. Nothing was downloaded here. The only run in this session was a synthetic plumbing check
@@ -55,11 +55,11 @@ lab runs use, `docs/RUN_ORDER.md` step 2), 5-minute resolution, natural bid/ask 
 leg, Green's 15% budget, equity-pct sizing, same entry-window and seed. Cadence: monthly and weekly, run separately.
 Window: 2016-10-01 to 2026-09-30.
 
-| | PLAIN | GUARDED |
+| | Green-Unguarded | GUARDED |
 |---|---|---|
 | Entry guards | none | gate, upside, event buffer, circuit breaker, earnings (inert for SPY) |
 | Exits | stop 2x credit on natural buyback; take-profit 50% of credit; breach; 21-DTE time exit | same |
-| Entry days | every scheduled day | only the days PLAIN entered |
+| Entry days | every scheduled day | only the days Green-Unguarded entered |
 
 **Green rules applied in the guarded arm (exactly):**
 
@@ -73,18 +73,25 @@ Window: 2016-10-01 to 2026-09-30.
 
 **Not applied:** the day-up half of the move guard (>= +1.5%), because the engine does not implement it.
 
+**Live config check (done before the VPS run).** The move guard was not removed on Oct 13. The repo's first commit is
+Oct 14 (`89ba9f2`), so no Oct 13 change exists in its history. `playground/config.py` sets `upside_guard: bool = True` and
+`upside_5d: float = 0.04` in every commit, and `profiles/green.yaml` does not override them. No Yellow profile
+(`profiles/yellow_E1..E7.yaml`) sets `upside_guard`, so they inherit it on. The only profiles that turn it off are the
+`experiment_*` ones. The day-up half (>= +1.5%) has never been in the engine; the only "1.5" in the gate code is the
+-1.5% day trigger. The calibration study (`claude/guard-calibration-study.py.txt`) is the only place that defines it.
+**Result: the 5-day up-move guard is in the Green config and in the guarded arm. No change was needed.**
+
 ## 3. How the matching works
 
-- PLAIN runs first. Its entry dates become a whitelist for GUARDED (`run_lab(..., entry_days=...)`, new in
-  `playground/lab.py`). GUARDED can therefore enter only days PLAIN entered. The subset is enforced by construction
-  and checked by `tests/test_guard_matched.py::test_guarded_entries_are_a_strict_subset_of_plain_entries`.
+- Green-Unguarded runs first. Its entry dates become a whitelist for GUARDED (`run_lab(..., entry_days=...)`, new in
+  `playground/lab.py`). GUARDED can therefore enter only days Green-Unguarded entered. The subset is enforced by construction
+  and checked by `tests/test_guard_matched.py::test_guarded_entries_are_a_strict_subset_of_unguarded_entries`.
 - Strike, expiry, and entry bar are functions of the day and the market, not the book, so they are identical in both
   arms. Exits depend only on each position's own quotes, so they are identical too.
 - Each arm keeps its own cash, sizing and equity path. **The return on risk per trade is sizing-free and is the
   primary metric.** Dollar figures and drawdown include the sizing-path effect and are labelled that way.
 - Each skipped trade is attributed to the guard that blocked its entry day in the guarded arm.
-- Split sample: first half vs second half at the calendar midpoint of the window (2021-09-30). The request was cut
-  off at "first half vs. second half of", so the split is my choice.
+- Split sample: the request was cut off at "first half vs. second half of", so the split is my choice. It is the calendar midpoint of the window: 2021-09-30, which is 1,825.5 days into the 3,651-day window (2016-10-01 to 2026-09-30). First half = entries dated 2016-10-01 to 2021-09-29; second half = 2021-09-30 to 2026-09-30. Each half covers five calendar years. A split by trade count (median entry date) would give different halves, because entry density is not uniform; say if you want that instead.
 
 ## 4. Decisions and deviations to review
 
@@ -96,21 +103,21 @@ Window: 2016-10-01 to 2026-09-30.
 3. **Circuit breaker is in the guarded arm** (it is a Green default, though not in your list). Its blocks are
    labelled `cb` in the reason tables, so you can read the result with or without it.
 4. **Budget is 15% in both arms**, not the `experiment` 5%.
-5. **Matched, not native.** A native guarded run would also free capacity that PLAIN never used, and could enter
+5. **Matched, not native.** A native guarded run would also free capacity that Green-Unguarded never used, and could enter
    extra days. That effect is not in this comparison. If you want it, it is a third arm and can be added later.
 6. **Cache gaps are now counted.** Before this change, a leg that was missing from the cache was silently treated as
    "not monitored" for that day (no stop, no exit), with no count. `_Lab._load` now counts those position-days in
-   `meta.json` (`leg_load_gaps`), and the report shows them per arm. A non-zero count on PLAIN means a result cannot
+   `meta.json` (`leg_load_gaps`), and the report shows them per arm. A non-zero count on Green-Unguarded means a result cannot
    be trusted yet.
 
 ## 5. VPS run
 
 **Pre-requisites.** `data/` must already contain SPY daily and VIX daily, 5-minute SPY spot (`spot`), real
-`data/events.csv` (`scripts/fetch_context_data.py`), and option quotes for the PLAIN arm's entries.
+`data/events.csv` (`scripts/fetch_context_data.py`), and option quotes for the Green-Unguarded arm's entries.
 
 **The option-quote download must run with the guards off.** Stage A of the downloader pre-filters entry days with the
 guard rules (`playground/downloader.py` `candidate_days`), and Stage B runs the engine with the same flags. Run with
-the guards on, it would fetch quotes only for days GUARDED would enter. PLAIN would then have no data on its
+the guards on, it would fetch quotes only for days GUARDED would enter. Green-Unguarded would then have no data on its
 guard-blocked days, and the comparison would be silently wrong. Use these flags for both cadences:
 
 ```bash
@@ -130,11 +137,11 @@ python -m playground.guard_matched --provider theta --data-dir data --events dat
 ```
 
 Output per cadence in `results/guard_matched/<cadence>/`: `summary.md` (all tables), `summary.json`,
-`trades_plain.csv`, `trades_guarded.csv`, `skipped_trades.csv`, `blocked_plain.csv`, `blocked_guarded.csv`.
+`trades_unguarded.csv`, `trades_guarded.csv`, `skipped_trades.csv`, `blocked_unguarded.csv`, `blocked_guarded.csv`.
 `results/` is git-ignored.
 
-**Before trusting any number,** check that PLAIN shows zero gap days and zero `position-days not monitored`. The
-guarded arm can only have a subset of these, so checking PLAIN is enough. A non-zero count means the download was
+**Before trusting any number,** check that Green-Unguarded shows zero gap days and zero `position-days not monitored`. The
+guarded arm can only have a subset of these, so checking Green-Unguarded is enough. A non-zero count means the download was
 incomplete. Re-run the download, do not interpret the table.
 
 ## 6. What was verified here

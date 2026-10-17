@@ -1,5 +1,5 @@
-"""Matched guarded-vs-plain comparison: the arms differ only in the Green guard switches, the guarded entries are a
-strict subset of the plain entries, and the metrics are right on a hand-built path."""
+"""Matched guarded-vs-unguarded comparison: the arms differ only in the Green guard switches, the guarded entries are a
+strict subset of the unguarded entries, and the metrics are right on a hand-built path."""
 import datetime as dt
 import sys
 from pathlib import Path
@@ -12,7 +12,7 @@ from helpers import market  # noqa: E402
 
 from playground.config import build_config, diff_switches  # noqa: E402
 from playground.guard_matched import (GUARD_KEYS, GUARD_REASONS, arm_metrics, entry_dates, guarded_config,  # noqa: E402
-                                      plain_config, run_matched, skipped_trades)
+                                      unguarded_config, run_matched, skipped_trades)
 from playground.lab import LabResult, run_id_for, run_lab  # noqa: E402
 
 D = dt.date
@@ -28,7 +28,7 @@ def drop_market(**kw):
 
 # ---------------------------------------------------------------- the arms
 def test_arms_differ_only_in_the_guard_switches():
-    p, g = plain_config("monthly", START, END), guarded_config("monthly", START, END)
+    p, g = unguarded_config("monthly", START, END), guarded_config("monthly", START, END)
     assert diff_switches(p, g) == sorted(GUARD_KEYS)
     assert not any([p.gate, p.upside_guard, p.event_buffer, p.cb_days, p.earnings_filter])
     assert p.term_filter is False and p.post_spike_wait == 0 and p.min_ivr == 0 and p.delta_cap_pct is None
@@ -43,7 +43,7 @@ def test_guarded_arm_carries_the_green_guard_values():
     assert (g.gate_vix, g.gate_day, g.gate_5d, g.upside_5d, g.event_buffer_days) == (25.0, -0.015, -0.04, 0.04, 2)
 
 
-@pytest.mark.parametrize("cfg_fn", [plain_config, guarded_config])
+@pytest.mark.parametrize("cfg_fn", [unguarded_config, guarded_config])
 def test_both_arms_share_budget_strike_and_exits(cfg_fn):
     c = cfg_fn("weekly", START, END)
     assert c.effective_budget() == pytest.approx(0.15)                        # Green budget, not the experiment 5%
@@ -53,26 +53,26 @@ def test_both_arms_share_budget_strike_and_exits(cfg_fn):
 
 # ---------------------------------------------------------------- the subset, enforced
 @pytest.mark.parametrize("cadence", ["monthly", "weekly"])
-def test_guarded_entries_are_a_strict_subset_of_plain_entries(cadence):
+def test_guarded_entries_are_a_strict_subset_of_unguarded_entries(cadence):
     p = drop_market()
     m = run_matched(p, EVENTS, "test-events", cadence, START, END)
-    plain_days, guarded_days = entry_dates(m.plain), entry_dates(m.guarded)
-    assert guarded_days <= plain_days                                          # subset
-    assert len(guarded_days) < len(plain_days)                                 # the guards really skipped something
+    unguarded_days, guarded_days = entry_dates(m.unguarded), entry_dates(m.guarded)
+    assert guarded_days <= unguarded_days                                          # subset
+    assert len(guarded_days) < len(unguarded_days)                                 # the guards really skipped something
     guard_hits = {r for r in m.guarded.blocked.reason} & set(GUARD_REASONS)
     assert guard_hits, "test market must trip at least one guard, or the test proves nothing"
-    assert not ({r for r in m.plain.blocked.reason} & set(GUARD_REASONS)), "plain arm must never block on a guard"
+    assert not ({r for r in m.unguarded.blocked.reason} & set(GUARD_REASONS)), "unguarded arm must never block on a guard"
     s = skipped_trades(m)
-    assert len(s) == len(plain_days - guarded_days)
+    assert len(s) == len(unguarded_days - guarded_days)
     assert "unexplained" not in set(s.guarded_reason)
 
 
 def test_whitelist_does_not_change_an_arm_that_has_no_guards():
     p = drop_market()
-    plain = run_lab(p, plain_config("weekly", START, END), EVENTS, "test-events")
-    again = run_lab(p, plain_config("weekly", START, END), EVENTS, "test-events", entry_days=entry_dates(plain))
-    assert list(again.trades.entry_ts) == list(plain.trades.entry_ts)
-    assert list(again.trades.pnl_per_contract) == pytest.approx(list(plain.trades.pnl_per_contract))
+    unguarded = run_lab(p, unguarded_config("weekly", START, END), EVENTS, "test-events")
+    again = run_lab(p, unguarded_config("weekly", START, END), EVENTS, "test-events", entry_days=entry_dates(unguarded))
+    assert list(again.trades.entry_ts) == list(unguarded.trades.entry_ts)
+    assert list(again.trades.pnl_per_contract) == pytest.approx(list(unguarded.trades.pnl_per_contract))
 
 
 def test_a_cache_gap_on_a_held_leg_is_counted_not_silent(monkeypatch):
@@ -86,13 +86,13 @@ def test_a_cache_gap_on_a_held_leg_is_counted_not_silent(monkeypatch):
         return orig(d, expiry, right, strike, ts_index, res)
 
     monkeypatch.setattr(p, "leg_arrays", flaky)
-    res = run_lab(p, plain_config("weekly", START, END), EVENTS, "test-events")
+    res = run_lab(p, unguarded_config("weekly", START, END), EVENTS, "test-events")
     assert res.meta["leg_load_gaps"] > 0
     assert arm_metrics(res)["leg_load_gaps"] == res.meta["leg_load_gaps"]
 
 
 def test_run_ids_of_existing_runs_are_unchanged_when_no_whitelist_is_given():
-    cfg = plain_config("weekly", START, END)
+    cfg = unguarded_config("weekly", START, END)
     res = run_lab(drop_market(), cfg, EVENTS, "test-events")
     expanded = cfg.replace(dte=[38, 45, 52])                                   # _Lab applies dte_target before hashing
     assert res.run_id == run_id_for(expanded, {"ticker": cfg.ticker, "events": "test-events", "window": None})
@@ -100,7 +100,7 @@ def test_run_ids_of_existing_runs_are_unchanged_when_no_whitelist_is_given():
 
 # ---------------------------------------------------------------- metrics on a known path
 def _hand_result() -> LabResult:
-    cfg = plain_config("monthly", "2016-01-01", "2016-12-31")
+    cfg = unguarded_config("monthly", "2016-01-01", "2016-12-31")
     trades = pd.DataFrame({
         "trade_id": ["a", "b", "c"], "entry_ts": ["2016-01-11T10:00:00", "2016-02-08T10:00:00", "2016-02-22T10:00:00"],
         "exit_reason": ["tp", "stop", "tp"], "pnl_per_contract": [10.0, -20.0, 5.0],

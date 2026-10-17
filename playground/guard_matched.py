@@ -1,15 +1,16 @@
-"""Matched guarded-vs-plain comparison on the lab engine: same entry days, same exits, guards on vs off.
+"""Matched guarded-vs-unguarded comparison on the lab engine: same entry days, same exits, guards on vs off.
 
-PLAIN    no entry guards. Iron condor, short strikes at delta 0.16 (both sides), DTE target 45, take-profit 50% of
-         credit, stop at 2x credit on the natural buyback, breach exit, 21-DTE time exit, natural fills, Green's
-         15% budget (both arms share it; the `experiment` tier would silently use 5%).
-GUARDED  PLAIN + the Green entry guards that exist in code (rules.py / config.py defaults):
+Green-Unguarded  the Green rules with all entry bars off: no gate, no up-move guard, no event buffer, no circuit
+         breaker, no earnings filter. Iron condor, short strikes at delta 0.16 (both sides), DTE target 45, take-profit
+         50% of credit, stop at 2x credit on the natural buyback, breach exit, 21-DTE time exit, natural fills, Green's
+         15% budget. Exits, sizing, strikes and fills are identical to GUARDED; only the entry bars differ.
+GUARDED          Green-Unguarded + the Green entry guards that exist in code (rules.py / config.py defaults):
          gate (VIX >= 25 or SPY day <= -1.5% or SPY 5-day <= -4%), upside (5-day >= +4%),
          event buffer (FOMC, CPI, PPI, NFP, ELECTION: no entry on the event day or 1-2 trading days before),
          circuit breaker (21 trading days after a losing month), earnings filter (inert for SPY: no EARNINGS rows).
 
-The guarded arm may enter only the days the plain arm entered (run_lab(entry_days=...)), so its entries are a
-strict subset of the plain arm's by construction. Sizing and the equity path are each arm's own.
+The guarded arm may enter only the days the unguarded arm entered (run_lab(entry_days=...)), so its entries are a
+strict subset of the unguarded arm's by construction. Sizing and the equity path are each arm's own.
 
 Usage (VPS, reads the existing parquet cache only; nothing is downloaded):
     python -m playground.guard_matched --provider theta --data-dir data --events data/events.csv
@@ -36,7 +37,7 @@ GUARD_KEYS = ("gate", "upside_guard", "event_buffer", "cb_days", "earnings_filte
 GUARD_REASONS = ("gate", "upside", "event", "cb")
 GAP_REASONS = ("nodata", "noquote")
 EXITS = ("stop", "tp", "time", "breach", "expiry", "other")
-PLAIN_PROFILE, GUARDED_PROFILE = "matched_plain", "matched_guarded"
+UNGUARDED_PROFILE, GUARDED_PROFILE = "green_unguarded", "green_guarded"
 
 
 # ---------------------------------------------------------------- the two arms
@@ -52,8 +53,8 @@ def _arm(profile: str, cadence: str, start: str, end: str, guards: bool) -> Conf
         earnings_filter=guards)
 
 
-def plain_config(cadence: str, start: str, end: str) -> Config:
-    return _arm(PLAIN_PROFILE, cadence, start, end, guards=False)
+def unguarded_config(cadence: str, start: str, end: str) -> Config:
+    return _arm(UNGUARDED_PROFILE, cadence, start, end, guards=False)
 
 
 def guarded_config(cadence: str, start: str, end: str) -> Config:
@@ -63,7 +64,7 @@ def guarded_config(cadence: str, start: str, end: str) -> Config:
 @dataclass
 class Matched:
     cadence: str
-    plain: LabResult
+    unguarded: LabResult
     guarded: LabResult
     scheduled_days: int
 
@@ -75,10 +76,10 @@ def entry_dates(res: LabResult) -> set[date]:
 
 
 def run_matched(provider, events, events_note: str, cadence: str, start: str, end: str) -> Matched:
-    plain = run_lab(provider, plain_config(cadence, start, end), events, events_note)
+    unguarded = run_lab(provider, unguarded_config(cadence, start, end), events, events_note)
     guarded = run_lab(provider, guarded_config(cadence, start, end), events, events_note,
-                      entry_days=entry_dates(plain))
-    return Matched(cadence, plain, guarded, _scheduled_days(provider, plain_config(cadence, start, end)))
+                      entry_days=entry_dates(unguarded))
+    return Matched(cadence, unguarded, guarded, _scheduled_days(provider, unguarded_config(cadence, start, end)))
 
 
 def _scheduled_days(provider, cfg: Config) -> int:
@@ -141,8 +142,8 @@ def by_year(res: LabResult) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- what the guards skipped
 def skipped_trades(m: Matched) -> pd.DataFrame:
-    """Plain-arm trades whose entry day the guarded arm did not take, with the reason it gave."""
-    pt = trade_table(m.plain)
+    """Green-Unguarded-arm trades whose entry day the guarded arm did not take, with the reason it gave."""
+    pt = trade_table(m.unguarded)
     gt_dates = set(trade_table(m.guarded).entry_date)
     reason = {}
     for d, r in zip(m.guarded.blocked.date, m.guarded.blocked.reason):
@@ -161,7 +162,7 @@ def _skip_stats(s: pd.DataFrame) -> dict:
 
 
 def difference(m: Matched, skipped: pd.DataFrame) -> dict:
-    p, g = arm_metrics(m.plain), arm_metrics(m.guarded)
+    p, g = arm_metrics(m.unguarded), arm_metrics(m.guarded)
     d = {k: g[k] - p[k] for k in ("trades", "mean_ror", "median_ror", "worst_5pct_ror", "worst_1pct_ror", "max_dd",
                                   "final_equity", "total_pnl_usd")}
     d["skipped"] = _skip_stats(skipped)
@@ -170,10 +171,10 @@ def difference(m: Matched, skipped: pd.DataFrame) -> dict:
 
 
 def split_sample(m: Matched, split: date) -> dict:
-    p, g, s = trade_table(m.plain), trade_table(m.guarded), skipped_trades(m)
+    p, g, s = trade_table(m.unguarded), trade_table(m.guarded), skipped_trades(m)
     out = {}
     for name, mask in (("first half", lambda x: x.entry_date < split), ("second half", lambda x: x.entry_date >= split)):
-        out[name] = {"plain": _arm_slice(p[mask(p)]), "guarded": _arm_slice(g[mask(g)]), "skipped": _skip_stats(s[mask(s)])}
+        out[name] = {"unguarded": _arm_slice(p[mask(p)]), "guarded": _arm_slice(g[mask(g)]), "skipped": _skip_stats(s[mask(s)])}
     return out
 
 
@@ -207,12 +208,12 @@ def _md(headers, rows) -> str:
 
 
 def render(m: Matched, split: date, source: str, events_note: str) -> str:
-    p, g = arm_metrics(m.plain), arm_metrics(m.guarded)
+    p, g = arm_metrics(m.unguarded), arm_metrics(m.guarded)
     s = skipped_trades(m)
     diff = difference(m, s)
     L = [f"## {m.cadence.capitalize()} cadence (SPY iron condor, delta 0.16)", "",
          f"Data: {source} | events: {events_note} | scheduled entry days: {m.scheduled_days} | "
-         f"switches that differ between arms: {', '.join(diff_switches(m.plain.cfg, m.guarded.cfg))}", ""]
+         f"switches that differ between arms: {', '.join(diff_switches(m.unguarded.cfg, m.guarded.cfg))}", ""]
     rows = [("trades", p["trades"], g["trades"]),
             ("entries blocked by a guard", sum(v for k, v in p["blocked"].items() if k in GUARD_REASONS),
              sum(v for k, v in g["blocked"].items() if k in GUARD_REASONS))]
@@ -231,51 +232,51 @@ def render(m: Matched, split: date, source: str, events_note: str) -> str:
               f"{g['worst_cycle']} {_f(g['worst_cycle_usd'], dp=0)}"),
              ("max drawdown of equity", _f(p["max_dd"], True, 1), _f(g["max_dd"], True, 1)),
              ("final equity ($)", _f(p["final_equity"], dp=0), _f(g["final_equity"], dp=0))]
-    L += ["### Per arm", "", _md(["metric", "PLAIN", "GUARDED"], rows), ""]
+    L += ["### Per arm", "", _md(["metric", "Green-Unguarded", "GUARDED"], rows), ""]
     k = diff["skipped"]
-    L += ["### Guarded minus plain", "", _md(["metric", "difference"], [
+    L += ["### Guarded minus unguarded", "", _md(["metric", "difference"], [
         ("trades", f"{diff['trades']:+d}"), ("mean RoR", _f(diff["mean_ror"], True)),
         ("worst 5% RoR", _f(diff["worst_5pct_ror"], True, 1)), ("max drawdown", _f(diff["max_dd"], True, 1)),
         ("final equity ($, includes sizing-path effect)", _f(diff["final_equity"], dp=0)),
         ("skipped trades: n / win rate / mean RoR", f"{k['n']} / {_f(k['win_rate'], True, 1)} / {_f(k['mean_ror'], True)}"),
         ("skipped trades: losers / winners", f"{k['losers']} / {k['winners']}"),
-        ("skipped trades: total $ at plain sizing (negative = guards removed losses)", _f(k["total_usd"], dp=0))]), ""]
+        ("skipped trades: total $ at unguarded sizing (negative = guards removed losses)", _f(k["total_usd"], dp=0))]), ""]
     rr = [(r, v["n"], _f(v["win_rate"], True, 1), _f(v["mean_ror"], True), _f(v["total_usd"], dp=0), v["losers"])
           for r, v in diff["skipped_by_reason"].items()]
     L += ["### Skipped trades by guard reason", "", _md(["guarded reason", "n", "win rate", "mean RoR", "total $", "losers"], rr), ""]
-    yr = by_year(m.plain).merge(by_year(m.guarded), on="year", how="outer", suffixes=("_plain", "_guarded")).fillna(0)
-    L += ["### Calendar year (entry year)", "", _md(["year", "trades plain", "trades guarded", "mean RoR plain",
-          "mean RoR guarded", "$ plain", "$ guarded"],
-          [(int(r.year), int(r.trades_plain), int(r.trades_guarded), _f(r.mean_ror_plain, True), _f(r.mean_ror_guarded, True),
-            _f(r.pnl_usd_plain, dp=0), _f(r.pnl_usd_guarded, dp=0)) for r in yr.itertuples()]), ""]
+    yr = by_year(m.unguarded).merge(by_year(m.guarded), on="year", how="outer", suffixes=("_unguarded", "_guarded")).fillna(0)
+    L += ["### Calendar year (entry year)", "", _md(["year", "trades unguarded", "trades guarded", "mean RoR unguarded",
+          "mean RoR guarded", "$ unguarded", "$ guarded"],
+          [(int(r.year), int(r.trades_unguarded), int(r.trades_guarded), _f(r.mean_ror_unguarded, True), _f(r.mean_ror_guarded, True),
+            _f(r.pnl_usd_unguarded, dp=0), _f(r.pnl_usd_guarded, dp=0)) for r in yr.itertuples()]), ""]
     sp = split_sample(m, split)
     rows = []
     for half, v in sp.items():
-        rows.append((half, v["plain"]["trades"], _f(v["plain"]["mean_ror"], True), _f(v["plain"]["worst_5pct_ror"], True, 1),
+        rows.append((half, v["unguarded"]["trades"], _f(v["unguarded"]["mean_ror"], True), _f(v["unguarded"]["worst_5pct_ror"], True, 1),
                      v["guarded"]["trades"], _f(v["guarded"]["mean_ror"], True), _f(v["guarded"]["worst_5pct_ror"], True, 1),
                      v["skipped"]["n"], _f(v["skipped"]["mean_ror"], True)))
-    L += [f"### Split sample (split at {split})", "", _md(["half", "plain n", "plain mean RoR", "plain worst 5%",
+    L += [f"### Split sample (split at {split})", "", _md(["half", "unguarded n", "unguarded mean RoR", "unguarded worst 5%",
           "guarded n", "guarded mean RoR", "guarded worst 5%", "skipped n", "skipped mean RoR"], rows), ""]
     return "\n".join(L)
 
 
 def write_outputs(m: Matched, out: Path, split: date, source: str, events_note: str) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    trade_table(m.plain).to_csv(out / "trades_plain.csv", index=False)
+    trade_table(m.unguarded).to_csv(out / "trades_unguarded.csv", index=False)
     trade_table(m.guarded).to_csv(out / "trades_guarded.csv", index=False)
     skipped_trades(m).to_csv(out / "skipped_trades.csv", index=False)
-    m.plain.blocked.to_csv(out / "blocked_plain.csv", index=False)
+    m.unguarded.blocked.to_csv(out / "blocked_unguarded.csv", index=False)
     m.guarded.blocked.to_csv(out / "blocked_guarded.csv", index=False)
     (out / "summary.md").write_text(render(m, split, source, events_note))
-    js = {"cadence": m.cadence, "scheduled_days": m.scheduled_days, "plain": arm_metrics(m.plain),
+    js = {"cadence": m.cadence, "scheduled_days": m.scheduled_days, "unguarded": arm_metrics(m.unguarded),
           "guarded": arm_metrics(m.guarded), "difference": difference(m, skipped_trades(m)),
-          "split": split_sample(m, split), "switches": {"plain": switches(m.plain.cfg), "guarded": switches(m.guarded.cfg)},
-          "data_range": m.plain.meta["data_range"], "events": events_note, "source": source}
+          "split": split_sample(m, split), "switches": {"unguarded": switches(m.unguarded.cfg), "guarded": switches(m.guarded.cfg)},
+          "data_range": m.unguarded.meta["data_range"], "events": events_note, "source": source}
     (out / "summary.json").write_text(json.dumps(js, indent=2, default=str))
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Matched guarded vs plain comparison (lab engine, cache only).")
+    ap = argparse.ArgumentParser(description="Matched guarded vs unguarded comparison (lab engine, cache only).")
     ap.add_argument("--provider", choices=["theta", "synthetic"], default="theta")
     ap.add_argument("--data-dir", default="data")
     ap.add_argument("--events", default="data/events.csv")
@@ -300,7 +301,7 @@ def main(argv=None) -> int:
     for cad in a.cadence:
         m = run_matched(prov, ev, note, cad, a.start, a.end)
         write_outputs(m, Path(a.out) / cad, split, prov.name, note)
-        print(f"[{cad}] plain {len(m.plain.trades)} trades, guarded {len(m.guarded.trades)} | "
+        print(f"[{cad}] unguarded {len(m.unguarded.trades)} trades, guarded {len(m.guarded.trades)} | "
               f"skipped {len(skipped_trades(m))} -> {Path(a.out) / cad / 'summary.md'}")
     return 0
 
