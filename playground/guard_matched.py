@@ -41,11 +41,14 @@ UNGUARDED_PROFILE, GUARDED_PROFILE = "green_unguarded", "green_guarded"
 
 
 # ---------------------------------------------------------------- the two arms
-def _arm(profile: str, cadence: str, start: str, end: str, guards: bool) -> Config:
+DTE_CHOICES = (30, 35, 45, 60, 90)
+
+
+def _arm(profile: str, cadence: str, start: str, end: str, guards: bool, dte_target: int = 45) -> Config:
     green = Config()
     return Config(
         profile=profile, tier="green", ticker="SPY", strategy="iron_condor", sizing="equity-pct",
-        entry_cadence=cadence, dte_target=45,
+        entry_cadence=cadence, dte_target=dte_target,
         strike_rule={**green.strike_rule, "mode": "delta", "put_delta": 0.16, "call_delta": 0.16},
         tp=0.50, stop_mult=2.0, breach_exit=True, time_exit=21, fill="natural",
         resolution="5m", spot_source="alpaca", spot_fallback="parity", start_date=start, end_date=end,
@@ -53,12 +56,12 @@ def _arm(profile: str, cadence: str, start: str, end: str, guards: bool) -> Conf
         earnings_filter=guards)
 
 
-def unguarded_config(cadence: str, start: str, end: str) -> Config:
-    return _arm(UNGUARDED_PROFILE, cadence, start, end, guards=False)
+def unguarded_config(cadence: str, start: str, end: str, dte_target: int = 45) -> Config:
+    return _arm(UNGUARDED_PROFILE, cadence, start, end, guards=False, dte_target=dte_target)
 
 
-def guarded_config(cadence: str, start: str, end: str) -> Config:
-    return _arm(GUARDED_PROFILE, cadence, start, end, guards=True)
+def guarded_config(cadence: str, start: str, end: str, dte_target: int = 45) -> Config:
+    return _arm(GUARDED_PROFILE, cadence, start, end, guards=True, dte_target=dte_target)
 
 
 @dataclass
@@ -75,11 +78,11 @@ def entry_dates(res: LabResult) -> set[date]:
     return {pd.Timestamp(s).date() for s in stamps}
 
 
-def run_matched(provider, events, events_note: str, cadence: str, start: str, end: str) -> Matched:
-    unguarded = run_lab(provider, unguarded_config(cadence, start, end), events, events_note)
-    guarded = run_lab(provider, guarded_config(cadence, start, end), events, events_note,
+def run_matched(provider, events, events_note: str, cadence: str, start: str, end: str, dte_target: int = 45) -> Matched:
+    unguarded = run_lab(provider, unguarded_config(cadence, start, end, dte_target), events, events_note)
+    guarded = run_lab(provider, guarded_config(cadence, start, end, dte_target), events, events_note,
                       entry_days=entry_dates(unguarded))
-    return Matched(cadence, unguarded, guarded, _scheduled_days(provider, unguarded_config(cadence, start, end)))
+    return Matched(cadence, unguarded, guarded, _scheduled_days(provider, unguarded_config(cadence, start, end, dte_target)))
 
 
 def _scheduled_days(provider, cfg: Config) -> int:
@@ -275,7 +278,7 @@ def write_outputs(m: Matched, out: Path, split: date, source: str, events_note: 
     (out / "summary.json").write_text(json.dumps(js, indent=2, default=str))
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Matched guarded vs unguarded comparison (lab engine, cache only).")
     ap.add_argument("--provider", choices=["theta", "synthetic"], default="theta")
     ap.add_argument("--data-dir", default="data")
@@ -283,11 +286,16 @@ def main(argv=None) -> int:
     ap.add_argument("--start", default="2016-10-01")
     ap.add_argument("--end", default="2026-09-30")
     ap.add_argument("--cadence", nargs="+", default=["monthly", "weekly"], choices=["monthly", "weekly"])
+    ap.add_argument("--dte-target", type=int, choices=DTE_CHOICES, default=45, help="target DTE of the short expiry")
     ap.add_argument("--out", default="results/guard_matched")
     ap.add_argument("--syn-start", default="2015-01-02")
     ap.add_argument("--syn-end", default="2025-12-31")
     ap.add_argument("--syn-seed", type=int, default=7)
-    a = ap.parse_args(argv)
+    return ap
+
+
+def main(argv=None) -> int:
+    a = build_parser().parse_args(argv)
     prov = factory.make(a.provider, "SPY", a.data_dir, a.syn_start, a.syn_end, a.syn_seed, rate=0.036)
     if prov.name == "synthetic":
         ev, note = prov.synthetic_events(), "SYNTHETIC-calendar(not real dates)"
@@ -299,7 +307,7 @@ def main(argv=None) -> int:
         ev, note = load_events(a.events), str(a.events)
     split = (pd.Timestamp(a.start) + (pd.Timestamp(a.end) - pd.Timestamp(a.start)) / 2).date()
     for cad in a.cadence:
-        m = run_matched(prov, ev, note, cad, a.start, a.end)
+        m = run_matched(prov, ev, note, cad, a.start, a.end, a.dte_target)
         write_outputs(m, Path(a.out) / cad, split, prov.name, note)
         print(f"[{cad}] unguarded {len(m.unguarded.trades)} trades, guarded {len(m.guarded.trades)} | "
               f"skipped {len(skipped_trades(m))} -> {Path(a.out) / cad / 'summary.md'}")
