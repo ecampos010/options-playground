@@ -47,6 +47,55 @@ def close_cost(legs, quotes, fill: str, haircut: float = 0.0) -> float:
     return c + (haircut if fill == "haircut" else 0.0)
 
 
+QUOTE_TOL = 1e-9
+
+
+def structure_range(legs) -> tuple[float, float]:
+    """Smallest and largest intrinsic close cost per share over all settlement prices. For a credit structure (condor,
+    fly) that is [0, width]: the wider wing for a condor, the far wing for a broken-wing butterfly. For a debit structure
+    the range is negative. Option legs only."""
+    strikes = sorted({l.strike for l in legs})
+    pts = [0.0] + strikes + [max(strikes + [1.0]) * 10]
+    costs = [-payoff_ps(legs, s) for s in pts]
+    return min(costs), max(costs)
+
+
+def quote_sanity_faults(legs, quotes, expiries) -> list[str]:
+    """Why one bar's option quotes cannot be trusted to decide an exit (empty list = sane).
+
+    legs: option legs; quotes: (bid, ask) per leg; expiries: expiry per leg. Only finite quotes are checked. A leg not
+    quoted yet is left to the existing no-quote path, so a missing quote is never a fault here.
+    Monotonicity is tested as no-arbitrage on the quotes (the lower strike's bid above the higher strike's ask), so a
+    mid that sits inside the spreads is not a fault. The cost bounds (the structure's intrinsic range, [0, width] for a
+    credit structure) are widened by the summed half-spreads,
+    so the quotes' own uncertainty is never read as a bad bar. The cost bound applies to a single-expiry structure only."""
+    faults = set()
+    finite = []
+    for (bq, aq) in quotes:
+        ok = math.isfinite(bq) and math.isfinite(aq)
+        if ok and bq > aq:
+            faults.add("crossed")
+        finite.append(ok)
+    for i in range(len(legs)):
+        for j in range(i + 1, len(legs)):
+            a, b = legs[i], legs[j]
+            if a.right != b.right or a.right not in "PC" or expiries[i] != expiries[j] or not (finite[i] and finite[j]):
+                continue
+            lo, hi = (i, j) if a.strike <= b.strike else (j, i)
+            if legs[lo].right == "P" and quotes[lo][0] > quotes[hi][1]:
+                faults.add("put_inverted")
+            if legs[lo].right == "C" and quotes[hi][0] > quotes[lo][1]:
+                faults.add("call_inverted")
+    if legs and all(finite) and len(set(expiries)) == 1:      # the intrinsic range only means something for one expiry
+        mids = [(0.5 * (bq + aq), 0.5 * (bq + aq)) for bq, aq in quotes]
+        slack = sum(0.5 * (aq - bq) for bq, aq in quotes)
+        cost = close_cost(legs, mids, "mid")
+        lo, hi = structure_range(legs)
+        if cost < lo - slack - QUOTE_TOL or cost > hi + slack + QUOTE_TOL:
+            faults.add("cost_range")
+    return sorted(faults)
+
+
 def intrinsic_cost(legs, S: float) -> float:
     """Cost to close option legs at expiry settlement price S (positive = pay)."""
     return -sum(l.qty * (max(l.strike - S, 0.0) if l.right == "P" else max(S - l.strike, 0.0))
@@ -258,6 +307,8 @@ class _Lab:
         self.eq_rows = []
         self.n_entries = 0
         self.leg_load_gaps = 0
+        self.quote_skips = 0                     # position-bars skipped because the quotes failed a sanity check
+        self.quote_fault_counts: dict[str, int] = {}
         rid_extra = {"ticker": cfg.ticker, "events": events_note, "window": window}
         if entry_days is not None:               # keyed in only when used, so existing run ids do not change
             rid_extra["entry_days"] = sorted(str(x) for x in entry_days)
@@ -305,6 +356,14 @@ class _Lab:
                 return None
             out.append((bq, aq))
         return out
+
+    def _quote_faults(self, pos: LabPos, b: int) -> list[str]:
+        """Sanity faults on bar b, read from the raw arrays (_quotes would hide a crossed quote as 'no quote')."""
+        faults = ["zero_size"] if any(l.qty == 0 for l in pos.legs) else []
+        opt = self._opt_legs(pos)
+        raw = [(pos.q[(l.right, l.strike)][0][b], pos.q[(l.right, l.strike)][1][b]) for l in opt]
+        expiries = [pos.leg_exp.get((l.right, l.strike), pos.expiry) for l in opt]
+        return sorted(set(faults) | set(quote_sanity_faults(opt, raw, expiries)))
 
     def _opt_legs(self, pos):
         return [l for l in pos.legs if l.right != "S"]
@@ -404,6 +463,12 @@ class _Lab:
     def _step(self, pos: LabPos, i, d, b, ts, spots, mins, used):
         cfg = self.cfg
         if pos.entry_day == d and b <= pos.entry_bar:
+            return
+        faults = self._quote_faults(pos, b)
+        if faults:                                   # bad quotes on this bar: no mark, no trigger, no pending fill
+            self.quote_skips += 1
+            for f in faults:
+                self.quote_fault_counts[f] = self.quote_fault_counts.get(f, 0) + 1
             return
         quotes = self._quotes(pos, b)
         if quotes is None:
@@ -850,6 +915,7 @@ class _Lab:
                               "first_missing": self.missing_spot_days[:10]},
             "delta_source": self.delta_src, "delta_source_tag": delta_source_tag(self.delta_src), "unit_mode": self.unit, "notes": self.notes,
             "leg_load_gaps": self.leg_load_gaps,
+            "quote_sanity": {"skipped_position_bars": self.quote_skips, "faults": dict(self.quote_fault_counts)},
             "events": self.events_note, "fill_model": cfg.fill, "fee_per_contract": cfg.fee_per_contract,
             "config_tag": config_tag(cfg), "level": cfg.level, "window": self.window,
             "adjustments": self.adjust_log,
