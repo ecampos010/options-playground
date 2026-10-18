@@ -86,10 +86,14 @@ def run_matched(provider, events, events_note: str, cadence: str, start: str, en
 
 
 def _scheduled_days(provider, cfg: Config) -> int:
+    """Count of the entry dates the lab run will try: the same schedule, with the same dte_target expansion the lab
+    engine applies in _Lab.__init__. Counting the unexpanded window scheduled the wrong target offset."""
     days = list(provider.get_underlying_daily().index)
     i0 = max(6, next((j for j, x in enumerate(days) if str(x) >= cfg.start_date), len(days)))
     i1 = max(j for j, x in enumerate(days) if str(x) <= cfg.end_date)
-    return len(entry_schedule(days, i0, i1, cfg)[0])
+    t = cfg.dte_target
+    lab_cfg = cfg.replace(dte=[t - 7, t, t + 7]) if t else cfg
+    return len(entry_schedule(days, i0, i1, lab_cfg)[0])
 
 
 # ---------------------------------------------------------------- per-trade and per-arm metrics
