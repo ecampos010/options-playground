@@ -232,6 +232,10 @@ class LabPos:
     leg_exp: dict = field(default_factory=dict)     # (right, strike) -> expiry for hedge legs on another expiry
 
 
+ENTRY_COLUMNS = ["trade_id", "entry_ts", "strategy", "short_put_strike", "short_put_delta",
+                 "short_put_delta_source", "short_call_strike", "short_call_delta", "short_call_delta_source"]
+
+
 @dataclass
 class LabResult:
     cfg: Config
@@ -243,6 +247,7 @@ class LabResult:
     equity: pd.DataFrame | None = None
     sizing: pd.DataFrame | None = None
     config_tag: str = ""
+    entries: pd.DataFrame | None = None      # one row per entry: short strikes, their deltas and where each delta came from
 
 
 def config_tag(cfg: Config) -> str:
@@ -335,6 +340,7 @@ class _Lab:
                     self.exdiv_before.add(self.days[k])
         self.pos: list[LabPos] = []
         self.trades, self.marks, self.blocked, self.sizing = [], [], [], []
+        self.entry_rows = []
         self.cash = cfg.start_equity
         self.cb_until = -1
         self.next_id = 1
@@ -867,6 +873,12 @@ class _Lab:
                 pos.entry_dist["C"] = (sc - spot) / spot
             if any(l.right == "S" for l in legs):
                 pos.shares.append((100.0, spot, False))
+            self.entry_rows.append({
+                "trade_id": f"{self.rid}-{pos.id}", "entry_ts": ts[b].isoformat(), "strategy": cfg.strategy,
+                "short_put_strike": sp, "short_put_delta": pos.sp_delta,
+                "short_put_delta_source": _delta_source(srcs, "P", sp),
+                "short_call_strike": sc, "short_call_delta": pos.sc_delta,
+                "short_call_delta_source": _delta_source(srcs, "C", sc)})
             self.next_id += 1
             for k in dsrc:
                 self.delta_src[k] += dsrc[k]
@@ -967,12 +979,20 @@ class _Lab:
         eq = pd.DataFrame(self.eq_rows) if not self.unit else None
         sz = pd.DataFrame(self.sizing, columns=["trade_id", "contracts", "equity_at_entry"]) if not self.unit else None
         meta["data_range"] = [str(d0), str(d1)]
-        return LabResult(cfg, self.rid, t, m, bl, meta, eq, sz, config_tag(cfg))
+        entries = pd.DataFrame(self.entry_rows, columns=ENTRY_COLUMNS)
+        return LabResult(cfg, self.rid, t, m, bl, meta, eq, sz, config_tag(cfg), entries)
 
 
 def is_open_at(expiry, last_data_date) -> bool:
     """A position is still open (unresolved) when its expiry is after the last date we have data for."""
     return pd.Timestamp(expiry).normalize() > pd.Timestamp(last_data_date).normalize()
+
+
+def _delta_source(srcs: dict, right: str, strike) -> str:
+    """Where a short strike's delta came from: 'thetadata', 'black_scholes', or 'none' (no short on that side)."""
+    if strike is None:
+        return "none"
+    return srcs.get((right, round(float(strike), 4)), "none")
 
 
 def entry_log_line(ticker, d, expiry, trade_id, legs, deltas, srcs) -> str:
@@ -1019,6 +1039,8 @@ def save_lab_run(res: LabResult, runs_dir: str | Path = "runs", command: str = "
     res.trades.to_csv(out / "trades.csv", index=False)
     res.marks.to_csv(out / "marks.csv", index=False)
     res.blocked.to_csv(out / "blocked_entries.csv", index=False)
+    if res.entries is not None:
+        res.entries.to_csv(out / "entries.csv", index=False)
     if res.equity is not None:
         res.equity.to_csv(out / "equity.csv", index=False)
         res.sizing.to_csv(out / "sizing.csv", index=False)
