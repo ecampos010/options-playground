@@ -285,7 +285,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--events", default="data/events.csv")
     ap.add_argument("--start", default="2016-10-01")
     ap.add_argument("--end", default="2026-09-30")
-    ap.add_argument("--cadence", nargs="+", default=["monthly", "weekly"], choices=["monthly", "weekly"])
+    ap.add_argument("--cadence", nargs="+", default=["monthly", "weekly"],
+                    choices=["monthly", "weekly", "biweekly"])
     ap.add_argument("--dte-target", type=int, choices=DTE_CHOICES, default=45, help="target DTE of the short expiry")
     ap.add_argument("--out", default="results/guard_matched")
     ap.add_argument("--syn-start", default="2015-01-02")
