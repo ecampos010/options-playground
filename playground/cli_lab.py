@@ -31,7 +31,7 @@ def add_lab_flags(p: argparse.ArgumentParser):
     g.add_argument("--ticker", default=S, help="SPY QQQ IWM GLD TLT")
     g.add_argument("--strategy", default=S, help="iron_condor iron_butterfly bull_put_spread put_bwb cash_secured_put covered_call long_put put_debit_spread long_strangle")
     g.add_argument("--sizing", choices=["equity-pct", "fixed1"], default=S, help="fixed1 = unit mode (1 contract, logs for the replay layer)")
-    g.add_argument("--entry-cadence", dest="entry_cadence", choices=["monthly", "weekly", "twice-weekly", "daily"], default=S)
+    g.add_argument("--entry-cadence", dest="entry_cadence", choices=["monthly", "weekly", "twice-weekly", "daily", "biweekly"], default=S)
     g.add_argument("--dte-target", dest="dte_target", type=int, choices=[30, 35, 45, 60, 90], default=S)
     g.add_argument("--width-mode", dest="width_mode", choices=["auto", "pct", "fixed"], default=S)
     g.add_argument("--width-pct", dest="width_pct", type=pctv, default=S, help="spread width as %% of spot (default 0.7)")

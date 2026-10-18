@@ -107,10 +107,48 @@ def third_friday(y: int, m: int) -> date:
     return d + timedelta(days=(4 - d.weekday()) % 7 + 14)
 
 
+def monthly_expiries(days: list[date], i0: int, i1: int, cfg: Config) -> list[date]:
+    """Third-Friday expiries with the monthly cadence's holiday rule (a holiday Friday expires the previous trading
+    day), from the month of the window start to the window end plus the longest DTE in cfg.dte."""
+    out = []
+    y, m = days[i0].year, days[i0].month
+    end = days[i1] + timedelta(days=cfg.dte[2] + 1)
+    while date(y, m, 1) <= end:
+        M = third_friday(y, m)
+        j = bisect.bisect_right(days, M) - 1
+        out.append(days[j] if (M <= days[-1] and j >= 0) else M)
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+def biweekly_schedule(days: list[date], i0: int, i1: int, cfg: Config) -> dict[date, date]:
+    """Entry date -> monthly expiry. Entries every 14 calendar days from days[i0] (the window start the monthly cadence
+    scans from). Each target falls on the nearest trading day, within 4 calendar days, else it is skipped: the monthly
+    cadence's rule. Each entry takes the monthly expiry nearest cfg.dte[1] (ties: the earlier expiry), and only if that
+    expiry lies inside the cfg.dte window. Weekly expiries are never used."""
+    sched: dict[date, date] = {}
+    lo, tgt, hi = cfg.dte
+    expiries = monthly_expiries(days, i0, i1, cfg)
+    T = days[i0]
+    while T <= days[i1]:
+        j = bisect.bisect_left(days, T)
+        cands = [x for x in (j - 1, j) if 0 <= x < len(days)]
+        best = min(cands, key=lambda x: (abs((days[x] - T).days), x))
+        if i0 <= best <= i1 and abs((days[best] - T).days) <= 4:
+            e = days[best]
+            pick = [x for x in expiries if lo <= (x - e).days <= hi]
+            if pick:
+                sched[e] = min(pick, key=lambda x: (abs((x - e).days - tgt), x))
+        T += timedelta(days=14)
+    return sched
+
+
 def entry_schedule(days: list[date], i0: int, i1: int, cfg: Config) -> tuple[dict, list]:
     """date -> expiry hint (or None). Monthly/scale-in schedules also return the expiries they target."""
     sched: dict[date, date | None] = {}
     t = cfg.dte[1]
+    if cfg.entry_cadence == "biweekly":
+        return biweekly_schedule(days, i0, i1, cfg), []
     if cfg.scale_in == 4 or cfg.entry_cadence == "monthly":
         offs = [t + 21, t + 14, t + 7, t] if cfg.scale_in == 4 else [t]
         y, m = days[i0].year, days[i0].month
@@ -215,7 +253,7 @@ def config_tag(cfg: Config) -> str:
     parts.append(f"tp{int(round(tp * 100))}")
     parts.append("sl" + (f"{cfg.stop_mult:g}" if cfg.stop_mult is not None else "none"))
     parts.append(f"t{cfg.time_exit}")
-    parts.append({"monthly": "m", "weekly": "w", "twice-weekly": "tw", "daily": "dly"}[cfg.entry_cadence])
+    parts.append({"monthly": "m", "weekly": "w", "twice-weekly": "tw", "daily": "dly", "biweekly": "bw"}[cfg.entry_cadence])
     if cfg.trigger and cfg.action != "none":
         parts.append(f"trg{cfg.trigger[0]}{cfg.trigger_value:g}-{cfg.action}")
     if cfg.stop_dollar:

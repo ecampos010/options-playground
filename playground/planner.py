@@ -139,7 +139,7 @@ def make_lab_plan(cfg: Config, daily_by_ticker: dict, vix, evx, cadences, *, max
             cands = set(candidate_days(c, daily, vix, evx))
             entries = len([d for d in sched if d in cands])
             years = max((alld[i1] - alld[i0]).days / 365.25, 1e-9)
-            n_exp = 1 if (cad == "monthly" or cfg.scale_in == 4) else cfg.entry_expiries
+            n_exp = 1 if (cad in ("monthly", "biweekly") or cfg.scale_in == 4) else cfg.entry_expiries
             strikes_side = 2 * cfg.band_strikes + 1 + 5
             a_req = n_exp * ((2 + 1) if delta_mode else (1 + 2 * strikes_side))      # trial+bulk+greeks | trial+bands
             a_rows = n_exp * (1600 if delta_mode else 2 * strikes_side)
