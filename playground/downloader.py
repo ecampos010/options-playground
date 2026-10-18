@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import threading
+from urllib.parse import urlsplit
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
@@ -131,6 +132,8 @@ class Fetcher:
         self._t0 = time.monotonic()
         self._disk = (0.0, 0)
         self.greeks_supported: bool | None = None
+        self.errlog = None                      # ErrorLog (playground/errorlog.py) or None: one row per failed request
+        self.stage = ""                         # who is asking, written to errors.csv: listing | A | B | greeks
 
     def set_limits(self, max_gb=None, max_hours=None):
         self.max_gb, self.max_hours, self._t0 = max_gb, max_hours, time.monotonic()
@@ -148,13 +151,22 @@ class Fetcher:
     def serial(self) -> "Fetcher":
         f = Fetcher(self.client, self.cache, self.tdays, 1, self.chunk, self.entry_fetch, self.log, self.symbol)
         f.failed = self.failed
+        f.errlog, f.stage = self.errlog, self.stage
         f.parallel = False
         f._bars_lock = self._bars_lock
         f.max_gb, f.max_hours, f._t0 = self.max_gb, self.max_hours, self._t0
         return f
 
-    def _fail(self, what: str, r):
+    def _log_request(self, r, **ctx):
+        """One errors.csv row for a failed request. Only failures are logged, so this never changes a fetch."""
+        if self.errlog is not None:
+            self.errlog.record(stage=self.stage, endpoint=urlsplit(r.url).path,
+                               error_type="denied" if r.denied else "request_failed", http_status=r.status,
+                               message=r.error or f"HTTP {r.status}", **ctx)
+
+    def _fail(self, what: str, r, **ctx):
         self.failed.append(what)
+        self._log_request(r, **ctx)
         raise FetchError(f"{what}: {r.error or r.status} [{r.url} {r.params}]")
 
     # ---------------------------------------------------------- listings
@@ -168,7 +180,7 @@ class Fetcher:
     def fetch_strikes(self, expiry):
         ks, r = self.client.strikes(expiry, self.symbol)
         if not r.ok:
-            self._fail(f"strikes {expiry}", r)
+            self._fail(f"strikes {expiry}", r, expiry=expiry)
         self.cache.save_strikes(expiry, ks)
         return ks
 
@@ -184,7 +196,7 @@ class Fetcher:
         end = self.tdays[min(len(self.tdays) - 1, idx + 19)] if idx is not None else d
         df, r = self.client.stock_spot_bars(self.symbol, d, end, res)
         if not r.ok:
-            self._fail(f"bars {d}", r)
+            self._fail(f"bars {d}", r, date=d)
         grid = set(bar_minutes(res))
         df = df.assign(_d=df.ts.dt.date, _m=df.ts.dt.hour * 60 + df.ts.dt.minute)
         df = df[df._m.isin(grid)]
@@ -221,7 +233,7 @@ class Fetcher:
         step = self._step(res)
         df, r = self.client.option_quotes_bulk(expiry, d, res, m, m + step, self.symbol)
         if not r.ok:
-            self._fail(f"bulk {d} {expiry}", r)
+            self._fail(f"bulk {d} {expiry}", r, date=d, expiry=expiry)
         df = df[(df.ts.dt.hour * 60 + df.ts.dt.minute) == m]
         universe = set(self.cache.strikes(expiry) or []) | set(strikes) | set(df.strike)
         for rt in ("P", "C"):
@@ -239,6 +251,7 @@ class Fetcher:
         self._check()
         df, r = self.client.greeks_bulk(expiry, d, res, m, m + self._step(res), self.symbol)
         if not r.ok:                      # 403/404/etc: endpoint unavailable -> stop asking, BS fallback
+            self._log_request(r, date=d, expiry=expiry)
             self.greeks_supported = False
             self.failed.append(f"greeks unsupported: {r.error[:120]}")
             return None
@@ -253,7 +266,7 @@ class Fetcher:
         def one(k):
             df, r = self.client.option_quotes(expiry, right, k, d, d, res, m, m + step, self.symbol)
             if not r.ok:
-                self._fail(f"quote {d} {expiry} {right}{k}", r)
+                self._fail(f"quote {d} {expiry} {right}{k}", r, date=d, expiry=expiry, right=right, strike=k)
             return k, df[(df.ts.dt.hour * 60 + df.ts.dt.minute) == m]
 
         got = self._map(one, list(strikes))
@@ -273,7 +286,7 @@ class Fetcher:
             else:
                 df, r = self.client.option_quotes(expiry, right, k, d, end, res, OPEN_MIN, CLOSE_MIN, self.symbol)
             if not r.ok:
-                self._fail(f"quote {d}..{end} {expiry} {right}{k}", r)
+                self._fail(f"quote {d}..{end} {expiry} {right}{k}", r, date=d, expiry=expiry, right=right, strike=k)
             return k, df
 
         for k, df in self._map(one, list(strikes)):
@@ -367,6 +380,9 @@ def stage_a(provider, fetcher: Fetcher, cfg: Config, evx, log, threads: int = 2,
                 continue
             if err:
                 log(f"stage A {fetcher.symbol} entry {d0}: {err[:200]}")
+                if fetcher.errlog is not None:
+                    fetcher.errlog.record(stage=fetcher.stage, date=d0, endpoint="stage_a", error_type="day_error",
+                                          message=err)
             (errors if err else done).append((d, err) if err else d)
             prog.tick(d0)
         log(f"stage A {fetcher.symbol} finished: {len(done)} ok, {len(errors)} with errors, "

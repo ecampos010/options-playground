@@ -268,13 +268,15 @@ def git_commit() -> str:
 
 class _Lab:
     def __init__(self, provider: Provider, cfg: Config, events, events_note: str, tinfo: TickerInfo | None,
-                 max_entries: int | None, window: dict | None, entry_log=None, entry_days: set | None = None):
+                 max_entries: int | None, window: dict | None, entry_log=None, entry_days: set | None = None,
+                 gap_log=None):
         if cfg.dte_target:
             cfg = cfg.replace(dte=[cfg.dte_target - 7, cfg.dte_target, cfg.dte_target + 7])
         self.strat = STRATEGIES[cfg.strategy]
         self.p, self.cfg, self.tinfo, self.window, self.max_entries = provider, cfg, tinfo, window, max_entries
         self.entry_log = entry_log               # optional callable: one line per opened entry (download log)
         self.entry_days = entry_days             # None = every scheduled day; else only these dates may be entered
+        self.gap_log = gap_log                   # optional callable(date, message): one call per missing spot day
         self.unit = cfg.sizing == "fixed1"
         self.events_note = events_note
         self.daily = provider.get_underlying_daily()
@@ -398,9 +400,11 @@ class _Lab:
                 bars, used = self.p.spot_bars(d, cfg.resolution, cfg.spot_source, cfg.spot_fallback)
                 ts, spots = bars.index, bars["spot"].tolist()
                 self.spot_days[used] = self.spot_days.get(used, 0) + 1
-            except MissingData:
+            except MissingData as ex:
                 ts, spots = pd.DatetimeIndex([]), []
                 self.missing_spot_days.append(str(d))
+                if self.gap_log is not None:
+                    self.gap_log(d, str(ex))
             mins = [t.hour * 60 + t.minute for t in ts]
             for pos in self.pos:
                 pos.q = None
@@ -958,7 +962,7 @@ def delta_source_tag(counts: dict) -> str:
 
 def run_lab(provider: Provider, cfg: Config, events=None, events_note: str = "", tinfo: TickerInfo | None = None,
             max_entries: int | None = None, window: dict | None = None, entry_log=None,
-            entry_days: set | None = None) -> LabResult:
+            entry_days: set | None = None, gap_log=None) -> LabResult:
     if tinfo is None:
         from .tickers import load_tickers
         tinfo = load_tickers().get(cfg.ticker)
@@ -968,7 +972,7 @@ def run_lab(provider: Provider, cfg: Config, events=None, events_note: str = "",
         raise ValueError(f"unknown action {cfg.action}")
     if cfg.event_buffer and events is None and not cfg.force_entry:
         raise ValueError("event_buffer is on but no events were supplied")
-    return _Lab(provider, cfg, events, events_note, tinfo, max_entries, window, entry_log, entry_days).run()
+    return _Lab(provider, cfg, events, events_note, tinfo, max_entries, window, entry_log, entry_days, gap_log).run()
 
 
 def save_lab_run(res: LabResult, runs_dir: str | Path = "runs", command: str = "") -> Path:

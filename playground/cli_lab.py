@@ -190,7 +190,9 @@ def cmd_download_lab(args):
     from .cache import DataCache
     from .cli import _client, make_cfg
     from .dailydata import ensure_daily, ensure_vol_indices
+    from datetime import datetime, timezone
     from .downloader import BudgetExceeded, Fetcher, stage_a, write_manifest
+    from .errorlog import ErrorLog
     from .lab import run_lab
     tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
     base = make_cfg(args)
@@ -200,9 +202,14 @@ def cmd_download_lab(args):
     log = make_logger(Path(args.data_dir) / "state" / "download.log")
     end = date.fromisoformat(base.end_date) if base.end_date else date.today() - timedelta(days=1)
     start = date.fromisoformat(base.start_date) if base.start_date else end - timedelta(days=365 * args.years)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    runs = Path(args.data_dir) / "state" / "runs"
     if not args.fake:
-        ensure_daily(root, client, start - timedelta(days=30), end, log)
-        ensure_vol_indices(root, log)
+        daily_log = ErrorLog(runs / f"{stamp}_daily" / "errors.csv")
+        ensure_daily(root, client, start - timedelta(days=30), end, log, errlog=daily_log)
+        ensure_vol_indices(root, log, errlog=daily_log)
+        daily_log.close()
+        print(f"ERRORS daily: {daily_log.path} {daily_log.summary()['by_type']}")
     else:
         syn = factory.synthetic("SPY", args.syn_start, args.syn_end, args.syn_seed)
         root.save_daily("SPY", syn.get_underlying_daily())
@@ -236,21 +243,31 @@ def cmd_download_lab(args):
                           chunk_days=args.chunk_days, entry_fetch="bulk" if cfg.strike_rule["mode"] == "delta" else args.entry_fetch,
                           log=log, symbol=t)
         fetcher.set_limits(args.max_gb, args.max_hours)
+        errlog = ErrorLog(runs / f"{stamp}_{t}" / "errors.csv")
+        fetcher.errlog = errlog
         prov = factory.theta(t, args.data_dir, fetcher, cfg.apy)
         evx = EventIndex(ev, list(daily.index), t) if ev is not None else None
         status = {}
         try:
+            fetcher.stage = "listing"
             if not cache.expirations():
                 fetcher.fetch_expirations()
+            fetcher.stage = "A"
             status["stage_a"] = stage_a(prov, fetcher, cfg, evx, log, threads=args.threads, limit=args.limit_days, lab=True,
                                        progress_every=args.progress_every)
             if not status["stage_a"]["stopped"]:
-                res = run_lab(prov, apply_overrides(cfg, {"sizing": "fixed1"}), ev, note, entry_log=log)
+                fetcher.stage = "B"
+                res = run_lab(prov, apply_overrides(cfg, {"sizing": "fixed1"}), ev, note, entry_log=log,
+                              gap_log=lambda d, msg: errlog.record(stage="B", date=d, endpoint=f"spot/{cfg.spot_source}",
+                                                                   error_type="missing_spot", message=msg))
                 status["stage_b_pass"] = {"trades": len(res.trades), "gaps": res.meta["spot_coverage"]["days_without_spot"]}
         except BudgetExceeded as e:
             status["stopped"] = str(e)
         except KeyboardInterrupt:
             log("interrupted - cache is consistent; re-run to resume")
+        errlog.close()
+        status["error_rows"] = errlog.summary()
+        print(f"ERRORS {t}: {errlog.path} {errlog.summary()['by_type']}")
         m = write_manifest(cache, fetcher, {"ticker": t, "status": status})
         print(f"MANIFEST {t}:", {k: v for k, v in m.items() if k not in ("failed", "status")})
         print(f"  status: { {k: (v if k != 'stage_a' else {a: b for a, b in v.items() if a != 'errors'}) for k, v in status.items()} }")
